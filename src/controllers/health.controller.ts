@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import mongoose from 'mongoose';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { ApiResponse } from '../utils/apiResponse.js';
+import { env } from '../config/env.js';
 
 export const healthCheck = asyncHandler(async (_req: Request, res: Response) => {
   const dbState = mongoose.connection.readyState;
@@ -16,7 +17,7 @@ export const healthCheck = asyncHandler(async (_req: Request, res: Response) => 
   const registeredModels = Object.keys(mongoose.models).sort();
 
   const response = ApiResponse.ok('Compliance Management System API is running', {
-    environment: process.env.NODE_ENV,
+    environment: env.NODE_ENV,
     uptime: Math.floor(process.uptime()),
     timestamp: new Date().toISOString(),
     database: {
