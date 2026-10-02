@@ -8,7 +8,7 @@ export const requiredDocumentSchema = z.object({
 
 export const notificationRulesSchema = z.object({
   reminderDays: z.array(z.number().int().positive()).default([90, 60, 30, 15, 7]),
-  notifyRoles: z.array(z.string()).default(['unit_manager', 'compliance_officer']),
+  notifyRoles: z.array(z.string()).default(['location_manager', 'compliance_officer']),
   channels: z.array(z.string()).default(['email', 'in_app']),
 });
 
@@ -36,7 +36,7 @@ export const createComplianceRuleSchema = z.object({
   frequency: z.string().min(1, 'Compliance frequency is required').trim(),
   renewalFrequency: z.string().optional(),
   // Allow 0 for one-time (ONETIME) compliance rules — was .positive() which blocked 0
-  renewalCycle: z.coerce.number().int().min(0).default(365),
+  renewalCycle: z.coerce.number().int().min(0).max(36500).default(365),
   requiredDocuments: z.array(requiredDocumentSchema).default([]),
   mandatory: z.boolean().default(true),
   active: z.boolean().default(true),

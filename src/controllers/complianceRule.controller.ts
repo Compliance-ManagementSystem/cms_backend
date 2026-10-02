@@ -1,163 +1,294 @@
 /**
  * Compliance Rule Controller
  *
- * Full CRUD, search, filter, status toggles, Master Data resolution, and
- * rule applicability evaluation via RuleEngineService.
+ * CRUD, search, status changes and applicability evaluation for compliance rules.
+ * Every Master Data reference is checked against its category before it is stored.
  */
 
 import { Request, Response } from 'express';
-import mongoose from 'mongoose';
-import ComplianceRule from '../models/ComplianceRule.js';
+import mongoose, { Types } from 'mongoose';
+import ComplianceRule, { IComplianceRule } from '../models/ComplianceRule.js';
 import MasterData from '../models/MasterData.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
-import Task from '../models/Task.js';
+import Entity from '../models/Entity.js';
+import Location from '../models/Location.js';
 import { RuleEngineService } from '../services/ruleEngine.service.js';
+import { auditService } from '../services/audit.service.js';
+import { ROLES } from '../constants/permissions.js';
+import { complianceRuleQuerySchema } from '../validations/complianceRule.validation.js';
+import { assertInScope } from '../utils/accessScope.js';
 import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
-import { logAuditEvent } from '../utils/audit.js';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const actorId = (req: Request) => req.user?._id || req.auth?.userId;
+
+const VALID_ROLES: string[] = Object.values(ROLES);
+const VALID_CHANNELS = ['email', 'in_app', 'sms', 'whatsapp'];
+// Older rules were saved with a role code that never existed
+const LEGACY_ROLES: Record<string, string> = { unit_manager: ROLES.LOCATION_MANAGER };
+
+/** Finds a Master Data item of the given category by id or code; rejects anything else */
+const resolveMasterData = async (category: string, input: unknown, label: string) => {
+  const value = String(input ?? '').trim();
+  if (!value) throw ApiError.badRequest(`${label} is required.`);
+
+  const item = mongoose.Types.ObjectId.isValid(value)
+    ? await MasterData.findOne({ _id: value, category })
+    : await MasterData.findOne({ category, code: value.toUpperCase() });
+  if (!item) throw ApiError.badRequest(`${label} "${value}" was not found in Master Data.`);
+  return item;
+};
+
+const resolveMasterDataIds = async (category: string, inputs: unknown[], label: string) => {
+  const ids = new Map<string, Types.ObjectId>();
+  for (const input of inputs) {
+    const item = await resolveMasterData(category, input, label);
+    ids.set(item._id.toString(), item._id as Types.ObjectId);
+  }
+  return [...ids.values()];
+};
+
+/** States are stored by name; each must be a state known to Master Data */
+const resolveStates = async (inputs: unknown[]) => {
+  if (inputs.length === 0) return [];
+  const known = await MasterData.find({ category: 'state' }).select('code label').lean();
+  const names = new Set<string>();
+  for (const input of inputs) {
+    const value = String(input ?? '').trim();
+    if (!value) continue;
+    const match = known.find(
+      (state) => state.label.toLowerCase() === value.toLowerCase() || state.code.toLowerCase() === value.toLowerCase()
+    );
+    if (!match) throw ApiError.badRequest(`State "${value}" was not found in Master Data.`);
+    names.add(match.label);
+  }
+  return [...names];
+};
+
+const resolveRequiredDocuments = async (docs: any[]) => {
+  const resolved: Array<{ documentType: Types.ObjectId; label: string; isMandatory: boolean }> = [];
+  for (const doc of docs) {
+    const type = await resolveMasterData('document_type', doc?.documentType, 'Document type');
+    resolved.push({
+      documentType: type._id as Types.ObjectId,
+      label: String(doc.label || '').trim() || type.label,
+      isMandatory: doc.isMandatory !== undefined ? Boolean(doc.isMandatory) : true,
+    });
+  }
+  return resolved;
+};
+
+const resolveRole = (input: unknown, label: string) => {
+  const value = String(input ?? '').trim();
+  const role = LEGACY_ROLES[value] || value;
+  if (!VALID_ROLES.includes(role)) throw ApiError.badRequest(`${label} "${value}" is not a role in this system.`);
+  return role;
+};
+
+const resolveNotificationRules = (input: any) => {
+  const reminderDays = [...new Set<number>((input?.reminderDays ?? [90, 60, 30, 15, 7]).map(Number))];
+  if (reminderDays.some((day) => !Number.isInteger(day) || day <= 0)) {
+    throw ApiError.badRequest('Reminder days must be whole numbers greater than zero.');
+  }
+  const channels: string[] = [...new Set<string>(input?.channels ?? ['email', 'in_app'])];
+  const unknownChannel = channels.find((channel) => !VALID_CHANNELS.includes(channel));
+  if (unknownChannel) throw ApiError.badRequest(`Notification channel "${unknownChannel}" is not supported.`);
+
+  const roles: unknown[] = input?.notifyRoles ?? [ROLES.LOCATION_MANAGER, ROLES.COMPLIANCE_OFFICER];
+  return {
+    reminderDays: reminderDays.sort((a, b) => b - a),
+    notifyRoles: [...new Set(roles.map((role) => resolveRole(role, 'Notify role')))],
+    channels,
+  };
+};
+
+const resolveEscalationRules = (input: any) => {
+  const escalateAfterDays = Number(input?.escalateAfterDays ?? 7);
+  if (!Number.isInteger(escalateAfterDays) || escalateAfterDays < 0) {
+    throw ApiError.badRequest('Escalation days must be a whole number, zero or more.');
+  }
+  return {
+    escalateAfterDays,
+    escalateToRole: resolveRole(input?.escalateToRole ?? ROLES.ENTITY_ADMIN, 'Escalation role'),
+    autoTaskCreation: input?.autoTaskCreation !== undefined ? Boolean(input.autoTaskCreation) : true,
+    escalationMessage: input?.escalationMessage ? String(input.escalationMessage).trim() : undefined,
+  };
+};
+
+/** Renewal cycle in days; 0 means a one-time obligation */
+const resolveRenewalCycle = (input: unknown) => {
+  const cycle = Number(input);
+  if (!Number.isInteger(cycle) || cycle < 0) {
+    throw ApiError.badRequest('Renewal cycle must be a whole number of days, or 0 for a one-time rule.');
+  }
+  return cycle;
+};
+
+const assertCodeAvailable = async (code: string, excludeId?: Types.ObjectId) => {
+  const clash = await ComplianceRule.findOne({ code, ...(excludeId ? { _id: { $ne: excludeId } } : {}) }).select('_id');
+  if (clash) throw ApiError.conflict(`Compliance Rule with code "${code}" already exists`);
+};
+
+const generateRuleCode = async (categoryCode: string) => {
+  const prefix = `RULE-${categoryCode.replace(/[^A-Z0-9]/g, '').slice(0, 4) || 'GEN'}`;
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const candidate = `${prefix}-${Math.floor(1000 + Math.random() * 9000)}`;
+    if (!(await ComplianceRule.exists({ code: candidate }))) return candidate;
+  }
+  return `${prefix}-${Date.now().toString().slice(-8)}`;
+};
+
+const idList = (values: unknown[] = []) => values.map((value) => String(value)).sort();
+
+const auditSnapshot = (rule: IComplianceRule) => {
+  const plain: any = rule.toObject({ virtuals: false });
+  return {
+    name: plain.name,
+    code: plain.code,
+    description: plain.description,
+    legalReference: plain.legalReference,
+    category: String(plain.category),
+    frequency: String(plain.frequency),
+    renewalCycle: plain.renewalCycle,
+    applicableEntityTypes: idList(plain.applicableEntityTypes),
+    applicableLocationTypes: idList(plain.applicableLocationTypes),
+    applicableStates: [...(plain.applicableStates || [])].sort(),
+    requiredDocuments: (plain.requiredDocuments || []).map((doc: any) => ({
+      documentType: String(doc.documentType),
+      label: doc.label,
+      isMandatory: doc.isMandatory,
+    })),
+    mandatory: plain.mandatory,
+    priority: plain.priority,
+    status: plain.status,
+    notificationRules: plain.notificationRules,
+    escalationRules: plain.escalationRules,
+    requiresApproval: plain.requiresApproval,
+    approvalLevels: plain.approvalLevels,
+  };
+};
+
+const logRuleAudit = (
+  req: Request,
+  action: 'CREATE' | 'UPDATE' | 'DELETE',
+  rule: IComplianceRule,
+  description: string,
+  values: { previousValue?: Record<string, unknown>; newValue?: Record<string, unknown> } = {}
+) =>
+  auditService.logMutation({
+    req,
+    action,
+    module: 'rules',
+    entityType: 'ComplianceRule',
+    recordId: rule._id,
+    description,
+    ...values,
+  });
+
+const populateRule = (id: Types.ObjectId) =>
+  ComplianceRule.findById(id)
+    .populate('category', 'code label')
+    .populate('frequency', 'code label')
+    .populate('applicableEntityTypes', 'code label')
+    .populate('applicableLocationTypes', 'code label')
+    .populate('requiredDocuments.documentType', 'code label')
+    .lean();
+
+const findRuleOrFail = async (id: string) => {
+  if (!mongoose.Types.ObjectId.isValid(id)) throw ApiError.badRequest('Invalid Compliance Rule ID format');
+  const rule = await ComplianceRule.findById(id);
+  if (!rule) throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
+  return rule;
+};
 
 // ── 1. Get Paginated Compliance Rules ─────────────────────────────────────────
 export const getComplianceRules = asyncHandler(async (req: Request, res: Response) => {
-  const page = Math.max(1, parseInt(req.query.page as string) || 1);
-  const limit = Math.max(1, Math.min(100, parseInt(req.query.limit as string) || 10));
-  const search = (req.query.search as string)?.trim();
-  const categoryParam = req.query.category as string;
-  const frequencyParam = req.query.frequency as string;
-  const statusParam = req.query.status as string;
-  const mandatoryParam = req.query.mandatory as string;
-  const stateParam = req.query.state as string;
-  const entityTypeParam = req.query.entityType as string;
-  const locationTypeParam = req.query.locationType as string;
-  const sortBy = (req.query.sortBy as string) || 'createdAt';
-  const sortOrder = req.query.sortOrder === 'asc' ? 1 : -1;
+  const { page, limit, search, category, frequency, status, mandatory, state, entityType, locationType, sortBy, sortOrder } =
+    complianceRuleQuerySchema.parse(req.query);
 
-  const query: Record<string, any> = {};
+  // Filters other than status, which the summary counts are broken down by
+  const conditions: Record<string, any>[] = [];
 
-  // Filter by Category
-  if (categoryParam) {
-    if (mongoose.Types.ObjectId.isValid(categoryParam)) {
-      query.category = categoryParam;
-    } else {
-      const catDoc = await MasterData.findOne({
-        category: 'compliance_category',
-        code: categoryParam.toUpperCase(),
-      });
-      if (catDoc) query.category = catDoc._id;
-    }
+  // A filter value that matches nothing in Master Data must return no rules, not all of them
+  const NO_MATCH = new Types.ObjectId();
+  const lookupId = async (masterCategory: string, value: string) => {
+    if (mongoose.Types.ObjectId.isValid(value)) return new Types.ObjectId(value);
+    const item = await MasterData.findOne({ category: masterCategory, code: value.toUpperCase() }).select('_id');
+    return (item?._id as Types.ObjectId) || NO_MATCH;
+  };
+
+  if (category) conditions.push({ category: await lookupId('compliance_category', category) });
+  if (frequency) conditions.push({ frequency: await lookupId('compliance_frequency', frequency) });
+  if (mandatory !== undefined) conditions.push({ mandatory });
+  if (entityType) {
+    // An empty list means the rule applies to every type
+    const id = await lookupId('entity_type', entityType);
+    conditions.push({ $or: [{ applicableEntityTypes: { $size: 0 } }, { applicableEntityTypes: id }] });
   }
-
-  // Filter by Frequency
-  if (frequencyParam) {
-    if (mongoose.Types.ObjectId.isValid(frequencyParam)) {
-      query.frequency = frequencyParam;
-    } else {
-      const freqDoc = await MasterData.findOne({
-        category: 'compliance_frequency',
-        code: frequencyParam.toUpperCase(),
-      });
-      if (freqDoc) query.frequency = freqDoc._id;
-    }
+  if (locationType) {
+    const id = await lookupId('location_type', locationType);
+    conditions.push({ $or: [{ applicableLocationTypes: { $size: 0 } }, { applicableLocationTypes: id }] });
   }
-
-  // Filter by Status
-  if (statusParam) {
-    query.status = statusParam;
+  if (state) {
+    conditions.push({
+      $or: [{ applicableStates: { $size: 0 } }, { applicableStates: new RegExp(`^${escapeRegex(state)}$`, 'i') }],
+    });
   }
-
-  // Filter by Mandatory
-  if (mandatoryParam !== undefined && mandatoryParam !== '') {
-    query.mandatory = mandatoryParam === 'true';
-  }
-
-  // Filter by State
-  if (stateParam) {
-    query.$or = [
-      { applicableStates: { $size: 0 } }, // Pan-India
-      { applicableStates: new RegExp(`^${stateParam.trim()}$`, 'i') },
-    ];
-  }
-
-  // Filter by Entity Type
-  if (entityTypeParam) {
-    if (mongoose.Types.ObjectId.isValid(entityTypeParam)) {
-      query.applicableEntityTypes = { $in: [new mongoose.Types.ObjectId(entityTypeParam)] };
-    }
-  }
-
-  // Filter by Location Type
-  if (locationTypeParam) {
-    if (mongoose.Types.ObjectId.isValid(locationTypeParam)) {
-      query.applicableLocationTypes = { $in: [new mongoose.Types.ObjectId(locationTypeParam)] };
-    }
-  }
-
-  // Search by text — use $and to avoid overwriting state $or filter
   if (search) {
-    const searchRegex = new RegExp(search, 'i');
-    const searchConditions = [
-      { name: searchRegex },
-      { code: searchRegex },
-      { description: searchRegex },
-      { legalReference: searchRegex },
-    ];
-    if (query.$or) {
-      // Combine existing $or (state/entityType filter) with search using $and
-      query.$and = [
-        ...(query.$and || []),
-        { $or: query.$or },
-        { $or: searchConditions },
-      ];
-      delete query.$or;
-    } else {
-      query.$or = searchConditions;
-    }
+    const searchRegex = new RegExp(escapeRegex(search), 'i');
+    conditions.push({
+      $or: [{ name: searchRegex }, { code: searchRegex }, { description: searchRegex }, { legalReference: searchRegex }],
+    });
   }
 
-  const skip = (page - 1) * limit;
+  const withConditions = (...extra: Record<string, any>[]) => {
+    const all = [...conditions, ...extra];
+    return all.length > 0 ? { $and: all } : {};
+  };
+  const query = withConditions(...(status ? [{ status }] : []));
 
-  // Run paginated query + total count + aggregate stats in parallel
-  const [rules, total, activeCount, mandatoryCount] = await Promise.all([
+  const [rules, total, activeCount, inactiveCount, archivedCount, mandatoryCount, categoryIds] = await Promise.all([
     ComplianceRule.find(query)
       .populate('category', 'code label description')
       .populate('frequency', 'code label')
       .populate('applicableEntityTypes', 'code label')
       .populate('applicableLocationTypes', 'code label')
       .populate('requiredDocuments.documentType', 'code label')
-      .sort({ [sortBy]: sortOrder })
-      .skip(skip)
+      .sort({ [sortBy]: sortOrder === 'asc' ? 1 : -1 })
+      .skip((page - 1) * limit)
       .limit(limit)
       .lean(),
     ComplianceRule.countDocuments(query),
-    ComplianceRule.countDocuments({ ...query, status: 'active' }),
-    ComplianceRule.countDocuments({ ...query, mandatory: true }),
+    // Status counts ignore the status filter itself so they stay meaningful as filter cards
+    ComplianceRule.countDocuments(withConditions({ status: 'active' })),
+    ComplianceRule.countDocuments(withConditions({ status: 'inactive' })),
+    ComplianceRule.countDocuments(withConditions({ status: 'archived' })),
+    ComplianceRule.countDocuments(withConditions(...(status ? [{ status }] : []), { mandatory: true })),
+    ComplianceRule.distinct('category', query),
   ]);
-
-  // Compute unique categories from the full filtered set
-  const categoryAgg = await ComplianceRule.distinct('category', query);
-  const uniqueCategoriesCount = categoryAgg.length;
 
   return ApiResponse.success(res, {
     rules,
-    pagination: {
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
-    },
+    pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     stats: {
       total,
       activeCount,
+      inactiveCount,
+      archivedCount,
       mandatoryCount,
-      uniqueCategoriesCount,
+      uniqueCategoriesCount: categoryIds.length,
     },
   });
 });
 
 // ── 2. Get Single Compliance Rule by ID ───────────────────────────────────────
 export const getComplianceRuleById = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
-
+  const id = String(req.params.id);
   if (!mongoose.Types.ObjectId.isValid(id)) {
     throw ApiError.badRequest('Invalid Compliance Rule ID format');
   }
@@ -181,454 +312,161 @@ export const getComplianceRuleById = asyncHandler(async (req: Request, res: Resp
 
 // ── 3. Create Compliance Rule ─────────────────────────────────────────────────
 export const createComplianceRule = asyncHandler(async (req: Request, res: Response) => {
-  const {
-    name,
-    code,
-    description,
-    category: categoryInput,
-    legalReference,
-    applicableEntityTypes: entityTypesInput = [],
-    applicableLocationTypes: locationTypesInput = [],
-    applicableStates = [],
-    frequency: frequencyInput,
-    renewalFrequency,
-    renewalCycle = 365,
-    requiredDocuments: docsInput = [],
-    mandatory = true,
-    active = true,
-    notificationRules,
-    escalationRules,
-    priority = 'medium',
-    status = 'active',
-    requiresApproval = false,
-    approvalLevels = 1,
-  } = req.body;
+  const body = req.body;
 
-  // 1. Resolve Category from Master Data
-  let categoryId: mongoose.Types.ObjectId;
-  if (mongoose.Types.ObjectId.isValid(categoryInput)) {
-    const catDoc = await MasterData.findOne({
-      _id: categoryInput,
-      category: 'compliance_category',
-    });
-    if (!catDoc) throw ApiError.badRequest('Invalid Compliance Category ID in Master Data');
-    categoryId = catDoc._id;
-  } else {
-    const catDoc = await MasterData.findOne({
-      category: 'compliance_category',
-      code: categoryInput.toUpperCase(),
-    });
-    if (!catDoc) {
-      throw ApiError.badRequest(`Compliance Category "${categoryInput}" not found in Master Data`);
-    }
-    categoryId = catDoc._id;
-  }
+  const category = await resolveMasterData('compliance_category', body.category, 'Compliance category');
+  const frequency = await resolveMasterData('compliance_frequency', body.frequency, 'Compliance frequency');
 
-  // 2. Resolve Frequency from Master Data
-  let frequencyId: mongoose.Types.ObjectId;
-  let frequencyCode = renewalFrequency || 'ANNUALLY';
-  if (mongoose.Types.ObjectId.isValid(frequencyInput)) {
-    const freqDoc = await MasterData.findOne({
-      _id: frequencyInput,
-      category: 'compliance_frequency',
-    });
-    if (!freqDoc) throw ApiError.badRequest('Invalid Compliance Frequency ID in Master Data');
-    frequencyId = freqDoc._id;
-    frequencyCode = freqDoc.code;
-  } else {
-    const freqDoc = await MasterData.findOne({
-      category: 'compliance_frequency',
-      code: frequencyInput.toUpperCase(),
-    });
-    if (!freqDoc) {
-      throw ApiError.badRequest(`Compliance Frequency "${frequencyInput}" not found in Master Data`);
-    }
-    frequencyId = freqDoc._id;
-    frequencyCode = freqDoc.code;
-  }
+  const code = String(body.code || '').trim().toUpperCase() || (await generateRuleCode(category.code));
+  await assertCodeAvailable(code);
 
-  // 3. Resolve Applicable Entity Types
-  const resolvedEntityTypes: mongoose.Types.ObjectId[] = [];
-  for (const item of entityTypesInput) {
-    if (mongoose.Types.ObjectId.isValid(item)) {
-      resolvedEntityTypes.push(new mongoose.Types.ObjectId(item));
-    } else {
-      const typeDoc = await MasterData.findOne({
-        category: 'entity_type',
-        code: item.toUpperCase(),
-      });
-      if (typeDoc) resolvedEntityTypes.push(typeDoc._id);
-    }
-  }
+  const status = body.status || (body.active === false ? 'inactive' : 'active');
 
-  // 4. Resolve Applicable Location Types
-  const resolvedLocationTypes: mongoose.Types.ObjectId[] = [];
-  for (const item of locationTypesInput) {
-    if (mongoose.Types.ObjectId.isValid(item)) {
-      resolvedLocationTypes.push(new mongoose.Types.ObjectId(item));
-    } else {
-      const typeDoc = await MasterData.findOne({
-        category: 'location_type',
-        code: item.toUpperCase(),
-      });
-      if (typeDoc) resolvedLocationTypes.push(typeDoc._id);
-    }
-  }
-
-  // 5. Resolve Required Documents
-  const resolvedDocs: Array<{ documentType: mongoose.Types.ObjectId; label: string; isMandatory: boolean }> = [];
-  for (const doc of docsInput) {
-    let docTypeId: mongoose.Types.ObjectId | undefined;
-    if (mongoose.Types.ObjectId.isValid(doc.documentType)) {
-      docTypeId = new mongoose.Types.ObjectId(doc.documentType);
-    } else {
-      const docTypeMaster = await MasterData.findOne({
-        category: 'document_type',
-        code: doc.documentType.toUpperCase(),
-      });
-      if (docTypeMaster) docTypeId = docTypeMaster._id;
-    }
-
-    if (docTypeId) {
-      resolvedDocs.push({
-        documentType: docTypeId,
-        label: doc.label || 'Required Document',
-        isMandatory: doc.isMandatory !== undefined ? doc.isMandatory : true,
-      });
-    }
-  }
-
-  // 6. Resolve Code
-  let resolvedCode = code?.trim().toUpperCase();
-  if (!resolvedCode) {
-    const catPrefix = categoryInput.slice(0, 4).toUpperCase();
-    const randomSuffix = Math.floor(1000 + Math.random() * 9000);
-    resolvedCode = `RULE-${catPrefix}-${randomSuffix}`;
-  }
-
-  const existingRule = await ComplianceRule.findOne({ code: resolvedCode });
-  if (existingRule) {
-    throw ApiError.conflict(`Compliance Rule with code "${resolvedCode}" already exists`);
-  }
-
-  // 7. Create Rule
   const newRule = await ComplianceRule.create({
-    name: name.trim(),
-    code: resolvedCode,
-    description: description?.trim() || '',
-    category: categoryId,
-    legalReference: legalReference?.trim() || '',
-    applicableEntityTypes: resolvedEntityTypes,
-    applicableLocationTypes: resolvedLocationTypes,
-    applicableStates: applicableStates.map((s: string) => s.trim()),
-    frequency: frequencyId,
-    renewalFrequency: frequencyCode,
-    renewalCycle: Number(renewalCycle) || 365,
-    requiredDocuments: resolvedDocs,
-    mandatory: Boolean(mandatory),
-    active: status === 'active' && Boolean(active),
-    status: status || 'active',
-    notificationRules: notificationRules || {
-      reminderDays: [90, 60, 30, 15, 7],
-      notifyRoles: ['unit_manager', 'compliance_officer'],
-      channels: ['email', 'in_app'],
-    },
-    escalationRules: escalationRules || {
-      escalateAfterDays: 7,
-      escalateToRole: 'entity_admin',
-      autoTaskCreation: true,
-    },
-    priority,
-    requiresApproval: Boolean(requiresApproval),
-    approvalLevels: Number(approvalLevels) || 1,
-    createdBy: req.user?._id || req.auth?.userId,
-    updatedBy: req.user?._id || req.auth?.userId,
+    name: String(body.name).trim(),
+    code,
+    description: body.description?.trim() || '',
+    category: category._id,
+    legalReference: body.legalReference?.trim() || '',
+    applicableEntityTypes: await resolveMasterDataIds('entity_type', body.applicableEntityTypes || [], 'Entity type'),
+    applicableLocationTypes: await resolveMasterDataIds('location_type', body.applicableLocationTypes || [], 'Location type'),
+    applicableStates: await resolveStates(body.applicableStates || []),
+    frequency: frequency._id,
+    renewalFrequency: frequency.code,
+    renewalCycle: resolveRenewalCycle(body.renewalCycle ?? 365),
+    requiredDocuments: await resolveRequiredDocuments(body.requiredDocuments || []),
+    mandatory: body.mandatory !== undefined ? Boolean(body.mandatory) : true,
+    status,
+    notificationRules: resolveNotificationRules(body.notificationRules),
+    escalationRules: resolveEscalationRules(body.escalationRules),
+    priority: body.priority || 'medium',
+    requiresApproval: Boolean(body.requiresApproval),
+    approvalLevels: Number(body.approvalLevels) || 1,
+    createdBy: actorId(req),
+    updatedBy: actorId(req),
   });
 
-  const populatedRule = await ComplianceRule.findById(newRule._id)
-    .populate('category', 'code label')
-    .populate('frequency', 'code label')
-    .populate('applicableEntityTypes', 'code label')
-    .populate('applicableLocationTypes', 'code label')
-    .populate('requiredDocuments.documentType', 'code label')
-    .lean();
-
-  await logAuditEvent({
-    action: 'CREATE',
-    resource: 'ComplianceRule',
-    resourceId: newRule._id.toString(),
-    userId: (req.user?._id || req.auth?.userId)?.toString(),
-    userEmail: req.user?.email || (req.auth as any)?.email,
-    userRole: (req.user?.role as any)?.code || req.auth?.role,
-    newValue: populatedRule,
-    description: `Created compliance rule "${newRule.name}" (${newRule.code})`,
-    req,
+  await logRuleAudit(req, 'CREATE', newRule, `Created compliance rule "${newRule.name}" (${newRule.code})`, {
+    newValue: auditSnapshot(newRule),
   });
 
-  return ApiResponse.created(res, { rule: populatedRule }, 'Compliance rule created successfully');
+  const rule = await populateRule(newRule._id);
+  return ApiResponse.created(res, { rule }, 'Compliance rule created successfully');
 });
 
 // ── 4. Update Compliance Rule ─────────────────────────────────────────────────
 export const updateComplianceRule = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const rule = await findRuleOrFail(String(req.params.id));
+  const body = req.body;
+  const previousValue = auditSnapshot(rule);
 
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw ApiError.badRequest('Invalid Compliance Rule ID format');
+  if (body.category !== undefined) {
+    rule.category = (await resolveMasterData('compliance_category', body.category, 'Compliance category'))._id;
+  }
+  if (body.frequency !== undefined) {
+    const frequency = await resolveMasterData('compliance_frequency', body.frequency, 'Compliance frequency');
+    rule.frequency = frequency._id;
+    rule.renewalFrequency = frequency.code;
   }
 
-  const existingRule = await ComplianceRule.findById(id);
-  if (!existingRule) {
-    throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
+  const code = String(body.code || '').trim().toUpperCase();
+  if (code && code !== rule.code) {
+    await assertCodeAvailable(code, rule._id);
+    rule.code = code;
   }
 
-  const {
-    name,
-    code,
-    description,
-    category: categoryInput,
-    legalReference,
-    applicableEntityTypes: entityTypesInput,
-    applicableLocationTypes: locationTypesInput,
-    applicableStates,
-    frequency: frequencyInput,
-    renewalFrequency,
-    renewalCycle,
-    requiredDocuments: docsInput,
-    mandatory,
-    active,
-    notificationRules,
-    escalationRules,
-    priority,
-    status,
-    requiresApproval,
-    approvalLevels,
-  } = req.body;
+  if (body.name !== undefined) rule.name = String(body.name).trim();
+  if (body.description !== undefined) rule.description = body.description?.trim() || '';
+  if (body.legalReference !== undefined) rule.legalReference = body.legalReference?.trim() || '';
+  if (body.renewalCycle !== undefined) rule.renewalCycle = resolveRenewalCycle(body.renewalCycle);
+  if (body.mandatory !== undefined) rule.mandatory = Boolean(body.mandatory);
+  if (body.priority) rule.priority = body.priority;
 
-  // Resolve Category if updated
-  if (categoryInput) {
-    if (mongoose.Types.ObjectId.isValid(categoryInput)) {
-      existingRule.category = new mongoose.Types.ObjectId(categoryInput);
-    } else {
-      const catDoc = await MasterData.findOne({
-        category: 'compliance_category',
-        code: categoryInput.toUpperCase(),
-      });
-      if (catDoc) existingRule.category = catDoc._id;
-    }
+  if (body.status !== undefined) rule.status = body.status;
+  else if (body.active !== undefined) rule.status = body.active ? 'active' : 'inactive';
+
+  if (body.applicableEntityTypes !== undefined) {
+    rule.applicableEntityTypes = await resolveMasterDataIds('entity_type', body.applicableEntityTypes, 'Entity type');
+  }
+  if (body.applicableLocationTypes !== undefined) {
+    rule.applicableLocationTypes = await resolveMasterDataIds('location_type', body.applicableLocationTypes, 'Location type');
+  }
+  if (body.applicableStates !== undefined) {
+    rule.applicableStates = await resolveStates(body.applicableStates);
+  }
+  // Keep the legacy copy in step, otherwise clearing a list would be undone on save
+  if (rule.applicability) {
+    if (body.applicableEntityTypes !== undefined) rule.applicability.entityTypes = rule.applicableEntityTypes;
+    if (body.applicableLocationTypes !== undefined) rule.applicability.locationTypes = rule.applicableLocationTypes;
+    if (body.applicableStates !== undefined) rule.applicability.states = rule.applicableStates;
   }
 
-  // Resolve Frequency if updated
-  if (frequencyInput) {
-    if (mongoose.Types.ObjectId.isValid(frequencyInput)) {
-      existingRule.frequency = new mongoose.Types.ObjectId(frequencyInput);
-    } else {
-      const freqDoc = await MasterData.findOne({
-        category: 'compliance_frequency',
-        code: frequencyInput.toUpperCase(),
-      });
-      if (freqDoc) {
-        existingRule.frequency = freqDoc._id;
-        existingRule.renewalFrequency = freqDoc.code;
-      }
-    }
+  if (body.requiredDocuments !== undefined) {
+    rule.requiredDocuments = await resolveRequiredDocuments(body.requiredDocuments);
   }
+  if (body.notificationRules !== undefined) rule.notificationRules = resolveNotificationRules(body.notificationRules);
+  if (body.escalationRules !== undefined) rule.escalationRules = resolveEscalationRules(body.escalationRules);
+  if (body.requiresApproval !== undefined) rule.requiresApproval = Boolean(body.requiresApproval);
+  if (body.approvalLevels !== undefined) rule.approvalLevels = Number(body.approvalLevels) || 1;
 
-  // Resolve Code if updated
-  const resolvedCode = code?.trim().toUpperCase();
-  if (resolvedCode && resolvedCode !== existingRule.code) {
-    const codeConflict = await ComplianceRule.findOne({
-      _id: { $ne: existingRule._id },
-      code: resolvedCode,
-    });
-    if (codeConflict) {
-      throw ApiError.conflict(`Compliance Rule with code "${resolvedCode}" already exists`);
-    }
-    existingRule.code = resolvedCode;
-  }
+  rule.updatedBy = actorId(req);
+  await rule.save();
 
-  if (name) existingRule.name = name.trim();
-  if (description !== undefined) existingRule.description = description?.trim() || '';
-  if (legalReference !== undefined) existingRule.legalReference = legalReference?.trim() || '';
-  if (renewalFrequency) existingRule.renewalFrequency = renewalFrequency;
-  if (renewalCycle !== undefined) existingRule.renewalCycle = Number(renewalCycle);
-  if (mandatory !== undefined) existingRule.mandatory = Boolean(mandatory);
-  if (priority) existingRule.priority = priority;
-
-  if (status !== undefined) {
-    existingRule.status = status;
-    existingRule.active = status === 'active';
-  } else if (active !== undefined) {
-    existingRule.active = Boolean(active);
-    existingRule.status = active ? 'active' : 'inactive';
-  }
-
-  // Update Applicability Filters
-  if (entityTypesInput !== undefined) {
-    const resolvedEntityTypes: mongoose.Types.ObjectId[] = [];
-    for (const item of entityTypesInput) {
-      if (mongoose.Types.ObjectId.isValid(item)) {
-        resolvedEntityTypes.push(new mongoose.Types.ObjectId(item));
-      } else {
-        const typeDoc = await MasterData.findOne({ category: 'entity_type', code: item.toUpperCase() });
-        if (typeDoc) resolvedEntityTypes.push(typeDoc._id);
-      }
-    }
-    existingRule.applicableEntityTypes = resolvedEntityTypes;
-  }
-
-  if (locationTypesInput !== undefined) {
-    const resolvedLocationTypes: mongoose.Types.ObjectId[] = [];
-    for (const item of locationTypesInput) {
-      if (mongoose.Types.ObjectId.isValid(item)) {
-        resolvedLocationTypes.push(new mongoose.Types.ObjectId(item));
-      } else {
-        const typeDoc = await MasterData.findOne({ category: 'location_type', code: item.toUpperCase() });
-        if (typeDoc) resolvedLocationTypes.push(typeDoc._id);
-      }
-    }
-    existingRule.applicableLocationTypes = resolvedLocationTypes;
-  }
-
-  if (applicableStates !== undefined) {
-    existingRule.applicableStates = applicableStates.map((s: string) => s.trim());
-  }
-
-  if (docsInput !== undefined) {
-    const resolvedDocs: Array<{ documentType: mongoose.Types.ObjectId; label: string; isMandatory: boolean }> = [];
-    for (const doc of docsInput) {
-      let docTypeId: mongoose.Types.ObjectId | undefined;
-      if (mongoose.Types.ObjectId.isValid(doc.documentType)) {
-        docTypeId = new mongoose.Types.ObjectId(doc.documentType);
-      } else {
-        const docTypeMaster = await MasterData.findOne({
-          category: 'document_type',
-          code: doc.documentType.toUpperCase(),
-        });
-        if (docTypeMaster) docTypeId = docTypeMaster._id;
-      }
-      if (docTypeId) {
-        resolvedDocs.push({
-          documentType: docTypeId,
-          label: doc.label || 'Document',
-          isMandatory: doc.isMandatory !== undefined ? doc.isMandatory : true,
-        });
-      }
-    }
-    existingRule.requiredDocuments = resolvedDocs;
-  }
-
-  if (notificationRules !== undefined) existingRule.notificationRules = notificationRules;
-  if (escalationRules !== undefined) existingRule.escalationRules = escalationRules;
-  if (requiresApproval !== undefined) existingRule.requiresApproval = Boolean(requiresApproval);
-  if (approvalLevels !== undefined) existingRule.approvalLevels = Number(approvalLevels) || 1;
-
-  existingRule.updatedBy = req.user?._id || req.auth?.userId;
-  await existingRule.save();
-
-  const updatedPopulated = await ComplianceRule.findById(existingRule._id)
-    .populate('category', 'code label')
-    .populate('frequency', 'code label')
-    .populate('applicableEntityTypes', 'code label')
-    .populate('applicableLocationTypes', 'code label')
-    .populate('requiredDocuments.documentType', 'code label')
-    .lean();
-
-  await logAuditEvent({
-    action: 'UPDATE',
-    resource: 'ComplianceRule',
-    resourceId: existingRule._id.toString(),
-    userId: (req.user?._id || req.auth?.userId)?.toString(),
-    userEmail: req.user?.email || (req.auth as any)?.email,
-    userRole: (req.user?.role as any)?.code || req.auth?.role,
-    previousValue: existingRule.toObject(),
-    newValue: updatedPopulated,
-    description: `Updated compliance rule "${existingRule.name}" (${existingRule.code})`,
-    req,
+  await logRuleAudit(req, 'UPDATE', rule, `Updated compliance rule "${rule.name}" (${rule.code})`, {
+    previousValue,
+    newValue: auditSnapshot(rule),
   });
 
-  return ApiResponse.success(res, { rule: updatedPopulated }, 'Compliance rule updated successfully');
+  const updated = await populateRule(rule._id);
+  return ApiResponse.success(res, { rule: updated }, 'Compliance rule updated successfully');
 });
 
 // ── 5. Toggle Rule Active Status ──────────────────────────────────────────────
 export const toggleRuleStatus = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const rule = await findRuleOrFail(String(req.params.id));
 
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw ApiError.badRequest('Invalid Compliance Rule ID format');
+  if (rule.status === 'archived') {
+    throw ApiError.badRequest(`Rule "${rule.name}" is archived. Restore it before activating it.`);
   }
 
-  const rule = await ComplianceRule.findById(id);
-  if (!rule) {
-    throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
-  }
-
-  const newStatus = rule.status === 'active' ? 'inactive' : 'active';
-  rule.status = newStatus;
-  rule.active = newStatus === 'active';
-  rule.updatedBy = req.user?._id || req.auth?.userId;
+  const previousStatus = rule.status;
+  rule.status = previousStatus === 'active' ? 'inactive' : 'active';
+  rule.updatedBy = actorId(req);
   await rule.save();
 
-  await logAuditEvent({
-    action: 'UPDATE',
-    resource: 'ComplianceRule',
-    resourceId: id,
-    userId: (req.user?._id || req.auth?.userId)?.toString(),
-    userEmail: req.user?.email || (req.auth as any)?.email,
-    userRole: (req.user?.role as any)?.code || req.auth?.role,
-    description: `Toggled compliance rule "${rule.name}" status to "${newStatus}"`,
+  await logRuleAudit(
     req,
-  });
+    'UPDATE',
+    rule,
+    `${rule.status === 'active' ? 'Activated' : 'Deactivated'} compliance rule "${rule.name}" (${rule.code})`,
+    { previousValue: { status: previousStatus }, newValue: { status: rule.status } }
+  );
 
-  return ApiResponse.success(res, { rule }, `Compliance rule ${newStatus === 'active' ? 'activated' : 'deactivated'} successfully`);
+  const updated = await populateRule(rule._id);
+  return ApiResponse.success(
+    res,
+    { rule: updated },
+    `Compliance rule ${rule.status === 'active' ? 'activated' : 'deactivated'} successfully`
+  );
 });
 
 // ── 6. Delete Compliance Rule ─────────────────────────────────────────────────
 export const deleteComplianceRule = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
+  const rule = await findRuleOrFail(String(req.params.id));
 
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw ApiError.badRequest('Invalid Compliance Rule ID format');
-  }
-
-  const rule = await ComplianceRule.findById(id);
-  if (!rule) {
-    throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
-  }
-
-  // Safety check 1: block deletion if compliance records exist for this rule
-  const recordsCount = await ComplianceRecord.countDocuments({ complianceRule: id });
+  const recordsCount = await ComplianceRecord.countDocuments({
+    $or: [{ rule: rule._id }, { complianceRule: rule._id }],
+  });
   if (recordsCount > 0) {
     throw ApiError.badRequest(
-      `Cannot delete compliance rule "${rule.name}" because it is referenced by ${recordsCount} existing compliance record(s). Deactivate the rule instead.`
+      `Cannot delete compliance rule "${rule.name}" because ${recordsCount} compliance record(s) use it. Archive the rule instead.`
     );
   }
 
-  // Safety check 2: block deletion if active tasks reference compliance records for this rule
-  const complianceRecordIds = await ComplianceRecord.distinct('_id', { complianceRule: id });
-  if (complianceRecordIds.length > 0) {
-    const taskCount = await Task.countDocuments({
-      complianceRecord: { $in: complianceRecordIds },
-      status: { $in: ['open', 'in_progress', 'pending_approval'] },
-    });
-    if (taskCount > 0) {
-      throw ApiError.badRequest(
-        `Cannot delete compliance rule "${rule.name}" because ${taskCount} active task(s) reference its compliance records. Complete or cancel those tasks first.`
-      );
-    }
-  }
+  const previousValue = auditSnapshot(rule);
+  await rule.deleteOne();
 
-  await ComplianceRule.findByIdAndDelete(id);
-
-  await logAuditEvent({
-    action: 'DELETE',
-    resource: 'ComplianceRule',
-    resourceId: id,
-    userId: (req.user?._id || req.auth?.userId)?.toString(),
-    userEmail: req.user?.email || (req.auth as any)?.email,
-    userRole: (req.user?.role as any)?.code || req.auth?.role,
-    description: `Deleted compliance rule "${rule.name}" (${rule.code})`,
-    req,
-  });
+  await logRuleAudit(req, 'DELETE', rule, `Deleted compliance rule "${rule.name}" (${rule.code})`, { previousValue });
 
   return ApiResponse.success(res, null, `Compliance rule "${rule.name}" deleted successfully`);
 });
@@ -637,61 +475,74 @@ export const deleteComplianceRule = asyncHandler(async (req: Request, res: Respo
 export const evaluateRuleApplicability = asyncHandler(async (req: Request, res: Response) => {
   const { ruleId, entityId, locationId } = req.body;
 
-  if (ruleId) {
-    // Evaluate single rule against entity/location
-    const result = await RuleEngineService.evaluateSingleRule(ruleId, {
-      entityId,
-      locationId,
-    });
-    return ApiResponse.success(res, result);
+  for (const [label, value] of [
+    ['rule', ruleId],
+    ['entity', entityId],
+    ['location', locationId],
+  ]) {
+    if (value && !mongoose.Types.ObjectId.isValid(value)) throw ApiError.badRequest(`Invalid ${label} ID format`);
   }
-
-  // Find all applicable rules for this target
   if (!entityId && !locationId) {
     throw ApiError.badRequest('Must provide at least entityId or locationId for evaluation');
   }
 
-  const result = await RuleEngineService.getApplicableRules({
-    entityId,
-    locationId,
-  });
+  // Users may only test against entities and locations they can see
+  if (locationId) {
+    const location = await Location.findById(locationId).select('entity');
+    if (!location) throw ApiError.notFound('Location not found.');
+    assertInScope(req, { entity: location.entity as any, location: location._id });
+  } else {
+    const entity = await Entity.findById(entityId).select('_id');
+    if (!entity) throw ApiError.notFound('Entity not found.');
+    assertInScope(req, { entity: entity._id });
+  }
+
+  const result = ruleId
+    ? await RuleEngineService.evaluateSingleRule(ruleId, { entityId, locationId })
+    : await RuleEngineService.getApplicableRules({ entityId, locationId });
 
   return ApiResponse.success(res, result);
 });
 
-// ── 8. Archive Compliance Rule (Feature F) ────────────────────────────────────
+// ── 8. Archive / Restore Compliance Rule ──────────────────────────────────────
 export const archiveComplianceRule = asyncHandler(async (req: Request, res: Response) => {
-  const { id } = req.params;
-
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw ApiError.badRequest('Invalid Compliance Rule ID format');
-  }
-
-  const rule = await ComplianceRule.findById(id);
-  if (!rule) {
-    throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
-  }
+  const rule = await findRuleOrFail(String(req.params.id));
 
   if (rule.status === 'archived') {
     throw ApiError.badRequest(`Rule "${rule.name}" is already archived`);
   }
 
+  const previousStatus = rule.status;
   rule.status = 'archived';
-  rule.active = false;
-  rule.updatedBy = req.user?._id || req.auth?.userId;
+  rule.updatedBy = actorId(req);
   await rule.save();
 
-  await logAuditEvent({
-    action: 'UPDATE',
-    resource: 'ComplianceRule',
-    resourceId: id,
-    userId: (req.user?._id || req.auth?.userId)?.toString(),
-    userEmail: req.user?.email || (req.auth as any)?.email,
-    userRole: (req.user?.role as any)?.code || req.auth?.role,
-    description: `Archived compliance rule "${rule.name}" (${rule.code})`,
-    req,
+  await logRuleAudit(req, 'UPDATE', rule, `Archived compliance rule "${rule.name}" (${rule.code})`, {
+    previousValue: { status: previousStatus },
+    newValue: { status: 'archived' },
   });
 
-  return ApiResponse.success(res, { rule }, `Compliance rule "${rule.name}" has been archived`);
+  const updated = await populateRule(rule._id);
+  return ApiResponse.success(res, { rule: updated }, `Compliance rule "${rule.name}" has been archived`);
 });
 
+/** Brings an archived rule back as inactive, so it only takes effect once someone activates it */
+export const restoreComplianceRule = asyncHandler(async (req: Request, res: Response) => {
+  const rule = await findRuleOrFail(String(req.params.id));
+
+  if (rule.status !== 'archived') {
+    throw ApiError.badRequest(`Rule "${rule.name}" is not archived`);
+  }
+
+  rule.status = 'inactive';
+  rule.updatedBy = actorId(req);
+  await rule.save();
+
+  await logRuleAudit(req, 'UPDATE', rule, `Restored compliance rule "${rule.name}" (${rule.code}) from the archive`, {
+    previousValue: { status: 'archived' },
+    newValue: { status: 'inactive' },
+  });
+
+  const updated = await populateRule(rule._id);
+  return ApiResponse.success(res, { rule: updated }, `Compliance rule "${rule.name}" restored as inactive`);
+});

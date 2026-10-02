@@ -31,7 +31,7 @@ const notificationRuleConfigSchema = new Schema<INotificationRuleConfig>(
     },
     notifyRoles: {
       type: [String],
-      default: ['unit_manager', 'compliance_officer'],
+      default: ['location_manager', 'compliance_officer'],
     },
     channels: {
       type: [String],
@@ -164,7 +164,7 @@ const complianceRuleSchema = new Schema<IComplianceRule>(
     // Frequency reference
     frequency: { type: Schema.Types.ObjectId, ref: 'MasterData', required: true },
     renewalFrequency: { type: String, default: 'ANNUALLY' },
-    renewalCycle: { type: Number, default: 365, min: 1 }, // in days
+    renewalCycle: { type: Number, default: 365, min: 0 }, // in days; 0 = one-time
     reminderDaysBefore: {
       type: [Number],
       default: [90, 60, 30, 15, 7],
@@ -178,7 +178,7 @@ const complianceRuleSchema = new Schema<IComplianceRule>(
       type: notificationRuleConfigSchema,
       default: () => ({
         reminderDays: [90, 60, 30, 15, 7],
-        notifyRoles: ['unit_manager', 'compliance_officer'],
+        notifyRoles: ['location_manager', 'compliance_officer'],
         channels: ['email', 'in_app'],
       }),
     },

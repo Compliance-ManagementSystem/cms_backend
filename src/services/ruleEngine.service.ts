@@ -13,6 +13,7 @@ import mongoose from 'mongoose';
 import ComplianceRule, { IComplianceRule } from '../models/ComplianceRule.js';
 import Entity, { IEntity } from '../models/Entity.js';
 import Location, { ILocation } from '../models/Location.js';
+import { ApiError } from '../utils/apiError.js';
 
 export interface EvaluationResult {
   isApplicable: boolean;
@@ -271,7 +272,7 @@ export class RuleEngineService {
       .lean();
 
     if (!rule) {
-      throw new Error(`Compliance Rule with ID "${ruleId}" not found`);
+      throw ApiError.notFound(`Compliance Rule with ID "${ruleId}" not found`);
     }
 
     let entityDoc: any = null;

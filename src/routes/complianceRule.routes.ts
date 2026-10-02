@@ -14,6 +14,7 @@ import {
   updateComplianceRule,
   toggleRuleStatus,
   archiveComplianceRule,
+  restoreComplianceRule,
   deleteComplianceRule,
   evaluateRuleApplicability,
 } from '../controllers/complianceRule.controller.js';
@@ -76,6 +77,12 @@ router.patch(
   '/:id/archive',
   requirePermission('compliance_rule:update'),
   archiveComplianceRule
+);
+
+router.patch(
+  '/:id/restore',
+  requirePermission('compliance_rule:update'),
+  restoreComplianceRule
 );
 
 router.delete(
