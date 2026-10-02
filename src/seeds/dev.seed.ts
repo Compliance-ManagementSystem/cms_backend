@@ -255,8 +255,8 @@ async function seed() {
   ]);
   log(`3 location types created: UNIT, CLINIC, OFFICE`);
 
-  // ── 5. Master Data (All 11 Categories) ────────────────────────────────────
-  section('5. Master Data (All 11 Categories)');
+  // ── 5. Master Data (All 12 Categories) ────────────────────────────────────
+  section('5. Master Data (All 12 Categories)');
 
   // 5a. Non-hierarchical categories + States
   const baseMasterData = await MasterData.insertMany([
@@ -321,6 +321,14 @@ async function seed() {
     { category: 'task_status', code: 'COMPLETED', label: 'Completed', description: 'Task finished and verified with evidence', sortOrder: 3, isSystem: true },
     { category: 'task_status', code: 'OVERDUE', label: 'Overdue', description: 'Task has passed its due date without completion', sortOrder: 4, isSystem: true },
     { category: 'task_status', code: 'CANCELLED', label: 'Cancelled', description: 'Task revoked or invalidated', sortOrder: 5, isSystem: true },
+
+    // Industries
+    { category: 'industry', code: 'HEALTHCARE', label: 'Healthcare', description: 'Hospitals, clinics and care providers', sortOrder: 1, isSystem: true },
+    { category: 'industry', code: 'PHARMA', label: 'Pharmaceuticals', description: 'Drug manufacturing and distribution', sortOrder: 2, isSystem: true },
+    { category: 'industry', code: 'DIAGNOSTICS', label: 'Diagnostics', description: 'Pathology and radiology laboratories', sortOrder: 3, isSystem: true },
+    { category: 'industry', code: 'MANUFACTURING', label: 'Manufacturing', description: 'Factories and production units', sortOrder: 4, isSystem: false },
+    { category: 'industry', code: 'IT_SERVICES', label: 'IT & Services', description: 'Technology and professional services', sortOrder: 5, isSystem: false },
+    { category: 'industry', code: 'RETAIL', label: 'Retail', description: 'Stores and consumer outlets', sortOrder: 6, isSystem: false },
 
     // 9. Notification rules
     { category: 'notification_rule', code: 'DUE_IN_90_DAYS', label: '90 Days Before Expiry', description: 'First advance warning for annual renewals', sortOrder: 1, isSystem: true },
@@ -463,6 +471,7 @@ async function seed() {
     name: 'CCPL Healthcare Pvt Ltd',
     code: 'CCPL',
     entityType: ccplType._id,
+    industry: byCode('industry', 'HEALTHCARE')._id,
     registrationNumber: 'U85110MH2020PTC123456',
     gstin: '27AABCC1234D1Z5',
     pan: 'AABCC1234D',

@@ -1,7 +1,7 @@
 /**
  * Admin Master Data Controller
  *
- * Full CRUD for the 11 core classification and lookup categories:
+ * Full CRUD for the 12 core classification and lookup categories:
  *   - Entity Types
  *   - Location Types
  *   - Compliance Categories
@@ -25,6 +25,7 @@ import { logAuditEvent } from '../utils/audit.js';
 // Canonical category definitions with descriptive labels
 export const CANONICAL_CATEGORIES = [
   { id: 'entity_type', name: 'Entity Types', description: 'Legal and structural entity classifications' },
+  { id: 'industry', name: 'Industries', description: 'Business sectors used to classify entities and target rules' },
   { id: 'location_type', name: 'Location Types', description: 'Physical branch and facility tiers' },
   { id: 'compliance_category', name: 'Compliance Categories', description: 'Regulatory domains and statutes' },
   { id: 'compliance_frequency', name: 'Compliance Frequencies', description: 'Filing, renewal, and audit intervals' },
