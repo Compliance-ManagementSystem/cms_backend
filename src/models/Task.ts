@@ -137,6 +137,25 @@ const taskSchema = new Schema<ITask>(
   { timestamps: true }
 );
 
+// ── Overdue definition ─────────────────────────────────────────────────────────
+// A task is overdue when it still needs action and its due date has passed.
+// This is derived, not stored. The "overdue" status value only exists on older
+// data and is treated as an open task.
+export const ACTIVE_TASK_STATUSES: TaskStatus[] = ['open', 'in_progress', 'pending_approval', 'overdue'];
+
+export const overdueTaskFilter = (now: Date = new Date()) => ({
+  status: { $in: ACTIVE_TASK_STATUSES },
+  dueDate: { $lt: now },
+});
+
+export const isTaskOverdue = (
+  task: { status: string; dueDate?: Date | string | null },
+  now: Date = new Date()
+): boolean =>
+  (ACTIVE_TASK_STATUSES as string[]).includes(task.status) &&
+  !!task.dueDate &&
+  new Date(task.dueDate) < now;
+
 // ── Indexes ────────────────────────────────────────────────────────────────────
 taskSchema.index({ assignedTo: 1, status: 1 });
 taskSchema.index({ entity: 1, status: 1 });

@@ -14,10 +14,13 @@
  */
 
 import { Types } from 'mongoose';
-import Task, { ITask } from '../models/Task.js';
+import Task, { ITask, ACTIVE_TASK_STATUSES, overdueTaskFilter } from '../models/Task.js';
 import ComplianceRecord, { IComplianceRecord } from '../models/ComplianceRecord.js';
+import Approval from '../models/Approval.js';
+import Role from '../models/Role.js';
 import User from '../models/User.js';
 import Settings from '../models/Settings.js';
+import { ApprovalWorkflowService } from './approvalWorkflow.service.js';
 import { auditService } from './audit.service.js';
 import { NotificationService } from './notification.service.js';
 import { emitTaskAssigned } from './socket.service.js';
@@ -47,14 +50,76 @@ export interface TaskQueryParams {
   priority?: string;
   entity?: string;
   location?: string;
+  complianceRecord?: string;
   assignedTo?: string;
-  myTasks?: boolean;
   overdueOnly?: boolean;
   dueDateFrom?: string;
   dueDateTo?: string;
   sortBy?: string;
   sortOrder?: 'asc' | 'desc';
 }
+
+// Compliance record status groups the automation triggers key off
+const AWAITING_UNIT = ['pending', 'correction', 'rejected'];
+const IN_REVIEW = ['submitted', 'resubmitted', 'under_review'];
+const GRANTED = ['approved', 'expiring_soon'];
+
+type AutoGenSource =
+  | 'expiry_monitor'
+  | 'expired_checker'
+  | 'approval_monitor'
+  | 'document_check'
+  | 'overdue_check';
+
+interface AutomationContext {
+  reminderDays: number[]; // ascending
+  today: Date; // start of day
+  roleIds: Record<string, Types.ObjectId>;
+  fallbackAssigneeId: Types.ObjectId | null;
+}
+
+export interface AutomationResult {
+  scannedRecordsCount: number;
+  createdTasksCount: number;
+  closedTasksCount: number;
+  notificationsCount: number;
+  failedRecordsCount: number;
+  details: Array<{ type: string; recordNumber: string; taskTitle: string }>;
+}
+
+interface AutoTaskSpec {
+  detailType: string;
+  recordNumber: string;
+  title: string;
+  description: string;
+  entity: Types.ObjectId;
+  location?: Types.ObjectId;
+  complianceRecord: Types.ObjectId;
+  assignedTo: Types.ObjectId | null;
+  priority: TaskPriority;
+  dueDate: Date;
+  status: TaskStatus;
+  taskType: ITask['taskType'];
+  autoGenSource: AutoGenSource;
+  autoGenKey: string;
+  notification?: {
+    type: 'compliance_expiring' | 'compliance_expired' | 'approval_required' | 'task_overdue';
+    title: string;
+    emailData: Record<string, unknown>;
+  };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const startOfDay = (date: Date): Date => {
+  const d = new Date(date);
+  d.setHours(0, 0, 0, 0);
+  return d;
+};
+
+const dateKey = (date: Date): string => new Date(date).toISOString().slice(0, 10);
+
+const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export class TaskAutomationService {
   /**
@@ -89,7 +154,7 @@ export class TaskAutomationService {
       type: 'task_assigned',
       title: `New Task Assigned: ${task.title}`,
       body: task.description || `You have been assigned a task due on ${new Date(task.dueDate).toLocaleDateString()}.`,
-      actionUrl: `/tasks`,
+      actionUrl: `/tasks?task=${task._id}`,
       relatedTask: task._id,
       entity: task.entity,
       emailData: {
@@ -108,118 +173,82 @@ export class TaskAutomationService {
   }
 
   /**
-   * 2. Query Tasks with pagination, search, status metrics, and RBAC scoping
+   * 2. Query Tasks with pagination, search and filters.
+   * `scopeFilter` restricts results to what the caller is allowed to see.
    */
-  public static async getTasks(
-    params: TaskQueryParams,
-    userContext?: { userId: string; role: string; entityId?: string | null; locationId?: string | null }
-  ) {
+  public static async getTasks(params: TaskQueryParams, scopeFilter: Record<string, any> = {}) {
     const page = params.page || 1;
     const limit = params.limit || 10;
     const skip = (page - 1) * limit;
 
-    const filter: Record<string, any> = {};
+    const conditions: Record<string, any>[] = [scopeFilter];
 
-    // RBAC Entity Scoping
-    if (userContext) {
-      if (userContext.role === ROLES.ENTITY_ADMIN && userContext.entityId) {
-        filter.entity = new Types.ObjectId(userContext.entityId);
-      } else if (userContext.role === ROLES.LOCATION_MANAGER && userContext.locationId) {
-        filter.location = new Types.ObjectId(userContext.locationId);
-      }
-    }
-
-    // Explicit Filters
-    if (params.myTasks && userContext) {
-      filter.assignedTo = new Types.ObjectId(userContext.userId);
-    } else if (params.assignedTo) {
-      filter.assignedTo = new Types.ObjectId(params.assignedTo);
+    if (params.assignedTo) {
+      conditions.push({ assignedTo: new Types.ObjectId(params.assignedTo) });
     }
 
     if (params.overdueOnly) {
-      filter.status = { $ne: 'completed' };
-      filter.dueDate = { $lt: new Date() };
-    } else if (params.status && params.status !== 'all') {
-      filter.status = params.status;
+      conditions.push(overdueTaskFilter());
+    }
+
+    if (params.status && params.status !== 'all') {
+      conditions.push({ status: params.status });
     }
 
     if (params.priority && params.priority !== 'all') {
-      filter.priority = params.priority;
+      conditions.push({ priority: params.priority });
     }
 
     if (params.entity) {
-      filter.entity = new Types.ObjectId(params.entity);
+      conditions.push({ entity: new Types.ObjectId(params.entity) });
     }
 
     if (params.location) {
-      filter.location = new Types.ObjectId(params.location);
+      conditions.push({ location: new Types.ObjectId(params.location) });
+    }
+
+    if (params.complianceRecord) {
+      conditions.push({ complianceRecord: new Types.ObjectId(params.complianceRecord) });
     }
 
     if (params.dueDateFrom || params.dueDateTo) {
-      filter.dueDate = {};
-      if (params.dueDateFrom) filter.dueDate.$gte = new Date(params.dueDateFrom);
-      if (params.dueDateTo) filter.dueDate.$lte = new Date(params.dueDateTo);
+      const dueDate: Record<string, Date> = {};
+      if (params.dueDateFrom) dueDate.$gte = new Date(params.dueDateFrom);
+      if (params.dueDateTo) dueDate.$lte = new Date(params.dueDateTo);
+      conditions.push({ dueDate });
     }
 
-    if (params.search) {
-      const searchRegex = new RegExp(params.search.trim(), 'i');
-      filter.$or = [{ title: searchRegex }, { description: searchRegex }];
+    if (params.search?.trim()) {
+      const searchRegex = new RegExp(escapeRegex(params.search.trim()), 'i');
+      const matchingRecordIds = await ComplianceRecord.find({ recordNumber: searchRegex }).distinct('_id');
+      conditions.push({
+        $or: [
+          { title: searchRegex },
+          { description: searchRegex },
+          ...(matchingRecordIds.length ? [{ complianceRecord: { $in: matchingRecordIds } }] : []),
+        ],
+      });
     }
 
-    // Sorting
+    const filter = { $and: conditions };
+
     const sortField = params.sortBy || 'dueDate';
     const sortDirection = params.sortOrder === 'desc' ? -1 : 1;
     const sortOptions: Record<string, 1 | -1> = { [sortField]: sortDirection };
 
-    const [tasks, total, metricsAggregation] = await Promise.all([
+    const [tasks, total] = await Promise.all([
       Task.find(filter)
         .sort(sortOptions)
         .skip(skip)
         .limit(limit)
-        .populate('entity', 'name entityCode')
-        .populate('location', 'name locationCode')
+        .populate('entity', 'name code entityCode')
+        .populate('location', 'name code locationCode')
         .populate('complianceRecord', 'recordNumber status dueDate expiryDate')
         .populate('assignedTo', 'firstName lastName email fullName avatar')
         .populate('completedBy', 'firstName lastName email fullName')
         .populate('createdBy', 'firstName lastName email fullName'),
       Task.countDocuments(filter),
-      Task.aggregate([
-        ...(filter.entity ? [{ $match: { entity: filter.entity } }] : []),
-        {
-          $group: {
-            _id: '$status',
-            count: { $sum: 1 },
-          },
-        },
-      ]),
     ]);
-
-    // Real Metrics
-    const metrics = {
-      total: 0,
-      open: 0,
-      in_progress: 0,
-      pending_approval: 0,
-      completed: 0,
-      overdue: 0,
-      cancelled: 0,
-    };
-
-    metricsAggregation.forEach((g) => {
-      const key = g._id as keyof typeof metrics;
-      if (metrics[key] !== undefined) {
-        metrics[key] = g.count;
-      }
-      metrics.total += g.count;
-    });
-
-    // Also count actual overdue tasks
-    const now = new Date();
-    metrics.overdue = await Task.countDocuments({
-      ...(filter.entity ? { entity: filter.entity } : {}),
-      status: { $in: ['open', 'in_progress', 'pending_approval'] },
-      dueDate: { $lt: now },
-    });
 
     return {
       tasks,
@@ -229,7 +258,6 @@ export class TaskAutomationService {
         total,
         totalPages: Math.ceil(total / limit) || 1,
       },
-      metrics,
     };
   }
 
@@ -238,8 +266,8 @@ export class TaskAutomationService {
    */
   public static async getTaskById(id: string): Promise<ITask> {
     const task = await Task.findById(id)
-      .populate('entity', 'name entityCode address')
-      .populate('location', 'name locationCode address')
+      .populate('entity', 'name code entityCode address')
+      .populate('location', 'name code locationCode address')
       .populate('complianceRecord', 'recordNumber status dueDate expiryDate rule')
       .populate('assignedTo', 'firstName lastName email fullName role avatar')
       .populate('completedBy', 'firstName lastName email fullName')
@@ -251,75 +279,40 @@ export class TaskAutomationService {
   }
 
   /**
-   * 4. Update Task Status
-   */
-  public static async updateTaskStatus(
-    id: string,
-    newStatus: TaskStatus,
-    userContext?: { userId: string; email: string }
-  ): Promise<ITask> {
-    const task = await Task.findById(id);
-    if (!task) throw ApiError.notFound('Task not found.');
-
-    const previousStatus = task.status;
-    task.status = newStatus;
-
-    if (newStatus === 'completed') {
-      task.completedAt = new Date();
-      if (userContext?.userId) {
-        task.completedBy = new Types.ObjectId(userContext.userId);
-      }
-    } else {
-      task.completedAt = undefined;
-      task.completedBy = undefined;
-    }
-
-    if (newStatus === 'in_progress' && !task.startedAt) {
-      task.startedAt = new Date();
-    }
-
-    task.updatedBy = userContext?.userId ? new Types.ObjectId(userContext.userId) : undefined;
-    await task.save();
-
-    // Audit Log
-    if (userContext?.userId) {
-      await auditService.logMutation({
-        userId: userContext.userId,
-        action: newStatus === 'completed' ? 'TASK_COMPLETED' : 'TASK_UPDATED',
-        module: 'tasks',
-        entityType: 'Task',
-        recordId: task._id,
-        entityId: task.entity as Types.ObjectId,
-        previousValue: { status: previousStatus },
-        newValue: { status: newStatus },
-        description: `Task "${task.title}" status changed from ${previousStatus} to ${newStatus}`,
-      });
-    }
-
-    return this.getTaskById(id);
-  }
-
-  /**
-   * General Update Task
+   * General Update Task — field edits, status changes and reassignment.
+   * Every change is audited; a new assignee is notified.
    */
   public static async updateTask(
     id: string,
-    updateData: any,
+    updateData: {
+      title?: string;
+      description?: string;
+      priority?: TaskPriority;
+      dueDate?: string | Date;
+      assignedTo?: string;
+      status?: TaskStatus;
+    },
     userId?: string
   ): Promise<ITask> {
     const task = await Task.findById(id);
     if (!task) throw ApiError.notFound('Task not found.');
 
-    const previousStatus = task.status;
+    const snapshot = () => ({
+      title: task.title,
+      description: task.description,
+      priority: task.priority,
+      dueDate: task.dueDate,
+      status: task.status,
+      assignedTo: task.assignedTo?.toString(),
+    });
+    const previous = snapshot();
 
-    if (updateData.status) {
+    if (updateData.status && updateData.status !== previous.status) {
       task.status = updateData.status;
       if (updateData.status === 'completed') {
         task.completedAt = new Date();
-        if (userId) {
-          task.completedBy = new Types.ObjectId(userId);
-        }
-      } else if (previousStatus === 'completed' && updateData.status !== 'completed') {
+        task.completedBy = userId ? new Types.ObjectId(userId) : undefined;
+      } else if (previous.status === 'completed') {
         task.completedAt = undefined;
         task.completedBy = undefined;
       }
@@ -331,8 +324,16 @@ export class TaskAutomationService {
     if (updateData.title) task.title = updateData.title;
     if (updateData.description !== undefined) task.description = updateData.description;
     if (updateData.priority) task.priority = updateData.priority;
-    if (updateData.dueDate !== undefined) task.dueDate = updateData.dueDate;
-    if (updateData.assignedTo !== undefined) task.assignedTo = updateData.assignedTo;
+    if (updateData.dueDate !== undefined) task.dueDate = new Date(updateData.dueDate);
+
+    const reassigned = !!updateData.assignedTo && updateData.assignedTo !== previous.assignedTo;
+    if (reassigned) {
+      const assignee = await User.exists({ _id: updateData.assignedTo, status: 'active' });
+      if (!assignee) throw ApiError.badRequest('Assignee must be an active user.');
+      task.assignedTo = new Types.ObjectId(updateData.assignedTo);
+      task.assignedBy = userId ? new Types.ObjectId(userId) : undefined;
+      task.assignedAt = new Date();
+    }
 
     if (userId) {
       task.updatedBy = new Types.ObjectId(userId);
@@ -340,19 +341,67 @@ export class TaskAutomationService {
 
     await task.save();
 
-    if (userId && updateData.status && previousStatus !== updateData.status) {
+    // Audit only the fields that actually changed
+    const current = snapshot();
+    const changedKeys = (Object.keys(current) as Array<keyof typeof current>).filter(
+      (key) => String(previous[key] ?? '') !== String(current[key] ?? '')
+    );
+
+    if (userId && changedKeys.length > 0) {
+      const pick = (source: typeof current) =>
+        Object.fromEntries(changedKeys.map((key) => [key, source[key]]));
+      const statusChanged = changedKeys.includes('status');
+
       await auditService.logMutation({
         userId,
-        action: updateData.status === 'completed' ? 'TASK_COMPLETED' : 'TASK_UPDATED',
+        action: statusChanged && current.status === 'completed' ? 'TASK_COMPLETED' : 'TASK_UPDATED',
         module: 'tasks',
         entityType: 'Task',
         recordId: task._id,
         entityId: task.entity as Types.ObjectId,
-        previousValue: { status: previousStatus },
-        newValue: { status: updateData.status },
-        description: `Task "${task.title}" status changed from ${previousStatus} to ${updateData.status}`,
+        previousValue: pick(previous),
+        newValue: pick(current),
+        description: statusChanged
+          ? `Task "${task.title}" status changed from ${previous.status} to ${current.status}`
+          : `Updated task "${task.title}" (${changedKeys.join(', ')})`,
       });
     }
+
+    const updated = await this.getTaskById(id);
+
+    if (reassigned && updateData.assignedTo !== userId) {
+      await NotificationService.dispatchNotification({
+        recipientId: task.assignedTo as Types.ObjectId,
+        type: 'task_assigned',
+        title: `Task Assigned to You: ${task.title}`,
+        body:
+          task.description ||
+          `You have been assigned a task due on ${new Date(task.dueDate).toLocaleDateString()}.`,
+        actionUrl: `/tasks?task=${task._id}`,
+        relatedTask: task._id,
+        entity: task.entity as Types.ObjectId,
+        emailData: {
+          taskTitle: task.title,
+          priority: task.priority,
+          dueDate: new Date(task.dueDate).toLocaleDateString(),
+          description: task.description,
+        },
+      });
+      emitTaskAssigned(updateData.assignedTo!, updated);
+    }
+
+    return updated;
+  }
+
+  /**
+   * Add a comment to a task
+   */
+  public static async addComment(id: string, text: string, userId: string): Promise<ITask> {
+    const task = await Task.findById(id);
+    if (!task) throw ApiError.notFound('Task not found.');
+
+    task.comments.push({ author: new Types.ObjectId(userId), text } as any);
+    await task.save();
 
     return this.getTaskById(id);
   }
@@ -366,9 +415,12 @@ export class TaskAutomationService {
   }
 
   /**
-   * Task Metrics (counters for dashboard and views)
+   * Task Metrics (counters for dashboard and views), limited to the caller's scope
    */
-  public static async getTaskMetrics(userId?: string): Promise<{
+  public static async getTaskMetrics(
+    scopeFilter: Record<string, any> = {},
+    userId?: string
+  ): Promise<{
     total: number;
     open: number;
     inProgress: number;
@@ -377,20 +429,22 @@ export class TaskAutomationService {
     overdue: number;
     cancelled: number;
   }> {
-    const query: any = {};
+    const base: Record<string, any>[] = [scopeFilter];
     if (userId) {
-      query.assignedTo = new Types.ObjectId(userId);
+      base.push({ assignedTo: new Types.ObjectId(userId) });
     }
+    const count = (extra: Record<string, any> = {}) =>
+      Task.countDocuments({ $and: [...base, extra] });
 
     const [total, open, inProgress, pendingApproval, completed, overdue, cancelled] =
       await Promise.all([
-        Task.countDocuments(query),
-        Task.countDocuments({ ...query, status: 'open' }),
-        Task.countDocuments({ ...query, status: 'in_progress' }),
-        Task.countDocuments({ ...query, status: 'pending_approval' }),
-        Task.countDocuments({ ...query, status: 'completed' }),
-        Task.countDocuments({ ...query, status: 'overdue' }),
-        Task.countDocuments({ ...query, status: 'cancelled' }),
+        count(),
+        count({ status: { $in: ['open', 'overdue'] } }),
+        count({ status: 'in_progress' }),
+        count({ status: 'pending_approval' }),
+        count({ status: 'completed' }),
+        count(overdueTaskFilter()),
+        count({ status: 'cancelled' }),
       ]);
 
     return {
@@ -404,396 +458,416 @@ export class TaskAutomationService {
     };
   }
 
-  /**
-   * 5. AUTOMATIC COMPLIANCE TASK GENERATION ENGINE
-   *
-   * Scans active compliance records and generates tasks for:
-   * 1. Compliance approaching expiry (configurable milestones: 30d, 15d, 7d, 1d)
-   * 2. Compliance expired
-   * 3. Pending review/approval
-   * 4. Missing mandatory documents
-   * 5. Overdue compliance
-   *
-   * PREVENTS DUPLICATES:
-   * Uses autoGenKey sparse unique indexing and checks for active tasks before creation.
-   */
-  public static async generateComplianceTasks(): Promise<{
-    scannedRecordsCount: number;
-    createdTasksCount: number;
-    notificationsCount: number;
-    details: Array<{ type: string; recordNumber: string; taskTitle: string }>;
-  }> {
-    // 1. Fetch Admin Settings for reminder intervals
+  // ── 5. AUTOMATIC COMPLIANCE TASK ENGINE ─────────────────────────────────────
+  //
+  // For each compliance record the engine works out which conditions currently hold:
+  //   - expiry_monitor   : granted compliance inside a reminder window
+  //   - expired_checker  : compliance has lapsed
+  //   - approval_monitor : submission is waiting on a reviewer
+  //   - document_check   : mandatory documents are missing before submission
+  //   - overdue_check    : submission deadline has passed
+  //
+  // It opens a task for every condition that holds and closes its own open tasks
+  // for conditions that no longer hold. Deduplication keys include the cycle
+  // (expiry date, due date or submission round) so each renewal cycle gets tasks.
+
+  private static async buildAutomationContext(): Promise<AutomationContext> {
     const settings = await Settings.findOne({ entity: null });
-    const reminderDays: number[] = settings?.notifications?.defaultReminderDays?.length
+    const configured: number[] = settings?.notifications?.defaultReminderDays?.length
       ? settings.notifications.defaultReminderDays
       : [30, 15, 7, 1];
 
-    // Find default fallback admin
-    const fallbackAdmin = await User.findOne({
-      role: {
-        $in: await User.find({ status: 'active' }).distinct('role'),
+    const roles = await Role.find({
+      code: {
+        $in: [ROLES.SUPER_ADMIN, ROLES.ADMIN, ROLES.ENTITY_ADMIN, ROLES.COMPLIANCE_OFFICER],
       },
+    }).select('code');
+    const roleIds: Record<string, Types.ObjectId> = {};
+    roles.forEach((r) => {
+      roleIds[r.code] = r._id as Types.ObjectId;
+    });
+
+    const fallbackAdmin = await User.findOne({
+      status: 'active',
+      role: { $in: [roleIds[ROLES.ADMIN], roleIds[ROLES.SUPER_ADMIN]].filter(Boolean) },
     }).select('_id');
 
-    const adminAssigneeId = fallbackAdmin?._id || new Types.ObjectId();
+    return {
+      reminderDays: [...configured].sort((a, b) => a - b),
+      today: startOfDay(new Date()),
+      roleIds,
+      fallbackAssigneeId: (fallbackAdmin?._id as Types.ObjectId) || null,
+    };
+  }
 
-    // 2. Fetch compliance records
-    const records = await ComplianceRecord.find({
-      status: { $ne: 'not_applicable' },
-    })
-      .populate('entity', 'name entityCode owner')
-      .populate('location', 'name locationCode manager')
-      .populate('rule', 'name code category requiredDocuments renewalCycle')
-      .populate('assignedUser', 'firstName lastName email fullName');
+  /**
+   * Picks someone who is allowed to review the record: a compliance officer for the
+   * entity, then an org-wide compliance officer, then the entity admin, then an admin.
+   */
+  private static async resolveReviewer(
+    entityId: Types.ObjectId,
+    ctx: AutomationContext
+  ): Promise<Types.ObjectId | null> {
+    const candidates = [
+      { role: ctx.roleIds[ROLES.COMPLIANCE_OFFICER], entity: entityId },
+      { role: ctx.roleIds[ROLES.COMPLIANCE_OFFICER], entity: null },
+      { role: ctx.roleIds[ROLES.ENTITY_ADMIN], entity: entityId },
+    ];
 
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    for (const candidate of candidates) {
+      if (!candidate.role) continue;
+      const user = await User.findOne({ status: 'active', ...candidate }).select('_id');
+      if (user) return user._id as Types.ObjectId;
+    }
+    return ctx.fallbackAssigneeId;
+  }
 
-    let createdTasksCount = 0;
-    let notificationsCount = 0;
-    const details: Array<{ type: string; recordNumber: string; taskTitle: string }> = [];
+  private static findAutomationRecords(filter: Record<string, any>) {
+    return ComplianceRecord.find(filter)
+      .populate('entity', 'name code owner')
+      .populate('location', 'name code manager')
+      .populate('rule', 'name code requiredDocuments renewalCycle')
+      .populate('complianceRule', 'name code requiredDocuments renewalCycle')
+      .populate('assignedUser', 'firstName lastName email');
+  }
 
-    for (const record of records) {
-      const rule = record.rule as any;
-      const entity = record.entity as any;
-      const location = record.location as any;
+  /**
+   * Creates an auto-generated task unless one already exists for this cycle
+   * or an equivalent task for the record is still open.
+   */
+  private static async createAutoTask(spec: AutoTaskSpec, result: AutomationResult): Promise<void> {
+    if (!spec.assignedTo) {
+      console.warn(`[Automation] No assignee available for "${spec.title}" — task skipped.`);
+      return;
+    }
 
-      const entityId = entity?._id || (record.populated?.('entity') ? null : record.entity);
-      if (!entityId) {
-        continue;
-      }
-      const locationId = location?._id || (record.populated?.('location') ? null : record.location);
+    const existing = await Task.findOne({
+      $or: [
+        { autoGenKey: spec.autoGenKey },
+        {
+          complianceRecord: spec.complianceRecord,
+          autoGenSource: spec.autoGenSource,
+          status: { $in: ACTIVE_TASK_STATUSES },
+        },
+      ],
+    }).select('_id');
+    if (existing) return;
 
-      const ruleName = rule?.name || 'Statutory Compliance';
-      const recordNumber = record.recordNumber;
+    let task: ITask;
+    try {
+      task = await Task.create({
+        title: spec.title,
+        description: spec.description,
+        entity: spec.entity,
+        location: spec.location,
+        complianceRecord: spec.complianceRecord,
+        assignedTo: spec.assignedTo,
+        priority: spec.priority,
+        dueDate: spec.dueDate,
+        status: spec.status,
+        taskType: spec.taskType,
+        isAutoGenerated: true,
+        autoGenSource: spec.autoGenSource,
+        autoGenKey: spec.autoGenKey,
+      });
+    } catch (err: any) {
+      // A concurrent run created the same task first
+      if (err?.code === 11000) return;
+      throw err;
+    }
 
-      // Determine default responsible user
-      const targetAssigneeId =
-        (record.assignedUser as any)?._id ||
-        location?.manager ||
-        entity?.owner ||
-        adminAssigneeId;
+    result.createdTasksCount++;
+    result.details.push({
+      type: spec.detailType,
+      recordNumber: spec.recordNumber,
+      taskTitle: spec.title,
+    });
 
-      // ── TRIGGER 1: Compliance Approaching Expiry ─────────────────────────────
-      if (record.expiryDate && record.status !== 'expired') {
-        const expiry = new Date(record.expiryDate);
-        expiry.setHours(0, 0, 0, 0);
-        const diffMs = expiry.getTime() - now.getTime();
-        const diffDays = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+    if (spec.notification) {
+      await NotificationService.dispatchNotification({
+        recipientId: spec.assignedTo,
+        type: spec.notification.type,
+        title: spec.notification.title,
+        body: spec.description,
+        actionUrl: `/compliance/records/${spec.complianceRecord}`,
+        relatedComplianceRecord: spec.complianceRecord,
+        relatedTask: task._id,
+        entity: spec.entity,
+        emailData: spec.notification.emailData,
+      });
+      result.notificationsCount++;
+    }
 
-        if (diffDays > 0) {
-          // Check if diffDays matches any configured milestone (e.g. exactly <= milestone)
-          const matchedMilestone = reminderDays.find(
-            (m) => diffDays <= m && diffDays > (m === 1 ? 0 : m / 2)
-          );
+    emitTaskAssigned(spec.assignedTo.toString(), task);
+  }
 
-          if (matchedMilestone !== undefined) {
-            const autoGenKey = `expiring_${record._id}_${matchedMilestone}d`;
+  /**
+   * Opens and closes auto-generated tasks for a single compliance record.
+   */
+  private static async evaluateRecord(
+    record: IComplianceRecord,
+    ctx: AutomationContext,
+    result: AutomationResult
+  ): Promise<void> {
+    const rule = (record.rule || record.complianceRule) as any;
+    const entity = record.entity as any;
+    const location = record.location as any;
 
-            // Duplicate Prevention Check
-            const existingTask = await Task.findOne({
-              $or: [
-                { autoGenKey },
-                {
-                  complianceRecord: record._id,
-                  taskType: 'renewal',
-                  status: { $in: ['open', 'in_progress', 'pending_approval'] },
-                },
-              ],
-            });
+    // Orphaned records (entity deleted) cannot own tasks
+    const entityId: Types.ObjectId | undefined = entity?._id;
+    if (!entityId) return;
+    const locationId: Types.ObjectId | undefined = location?._id;
 
-            if (!existingTask) {
-              const priority: TaskPriority =
-                diffDays <= 7 ? 'critical' : diffDays <= 15 ? 'high' : 'medium';
-              const title = `Compliance Expiring in ${diffDays}d: ${ruleName}`;
-              const description = `Statutory compliance record ${recordNumber} for ${location?.name || 'Unit'} will expire on ${expiry.toLocaleDateString()}. Please prepare and file renewal documents.`;
+    const ruleName = rule?.name || 'Statutory Compliance';
+    const unitName = location?.name || 'Unit';
+    const recordNumber = record.recordNumber;
 
-              const newTask = await Task.create({
-                title,
-                description,
-                entity: entityId,
-                location: locationId,
-                complianceRecord: record._id,
-                assignedTo: targetAssigneeId,
-                priority,
-                dueDate: record.expiryDate,
-                status: 'open',
-                taskType: 'renewal',
-                isAutoGenerated: true,
-                autoGenSource: 'expiry_monitor',
-                autoGenKey,
-              });
+    const responsibleUserId: Types.ObjectId | null =
+      (record.assignedUser as any)?._id || location?.manager || entity?.owner || ctx.fallbackAssigneeId;
 
-              createdTasksCount++;
-              details.push({ type: 'expiring_soon', recordNumber, taskTitle: title });
+    const expiry = record.expiryDate ? startOfDay(record.expiryDate) : null;
+    const due = record.dueDate ? startOfDay(record.dueDate) : null;
+    const daysToExpiry = expiry
+      ? Math.round((expiry.getTime() - ctx.today.getTime()) / DAY_MS)
+      : null;
 
-              // Dispatch Notification
-              await NotificationService.dispatchNotification({
-                recipientId: targetAssigneeId,
-                type: 'compliance_expiring',
-                title: `Compliance Expiring Soon (${diffDays} days)`,
-                body: description,
-                actionUrl: `/compliance/records/${record._id}`,
-                relatedComplianceRecord: record._id,
-                relatedTask: newTask._id,
-                entity: entityId,
-                emailData: {
-                  ruleName,
-                  recordNumber,
-                  expiryDate: expiry.toLocaleDateString(),
-                  daysLeft: diffDays,
-                },
-              });
-              notificationsCount++;
-            }
-          }
-        }
-      }
+    // Only a granted compliance can lapse. Records still moving through the
+    // workflow keep their status so they can be submitted and reviewed.
+    if (GRANTED.includes(record.status) && expiry && expiry < ctx.today) {
+      record.status = 'expired';
+      await record.save();
+    }
+    const status = record.status;
 
-      // ── TRIGGER 2: Compliance Expired ────────────────────────────────────────
-      if (record.expiryDate) {
-        const expiry = new Date(record.expiryDate);
-        expiry.setHours(0, 0, 0, 0);
+    // ── Which conditions hold right now ───────────────────────────────────────
+    const milestone =
+      GRANTED.includes(status) && daysToExpiry !== null && daysToExpiry > 0
+        ? ctx.reminderDays.find((m) => daysToExpiry <= m)
+        : undefined;
 
-        if (expiry < now) {
-          // Only a granted compliance can lapse. Records still moving through the
-          // workflow keep their status so they can be submitted and reviewed.
-          if (record.status === 'approved' || record.status === 'expiring_soon') {
-            record.status = 'expired';
-            await record.save();
-          }
+    const awaitingUnit = AWAITING_UNIT.includes(status);
+    const documentBlocker = awaitingUnit
+      ? ApprovalWorkflowService.getDocumentBlocker(
+          'Submit',
+          await ApprovalWorkflowService.getDocumentRequirements(record)
+        )
+      : null;
 
-          const autoGenKey = `expired_${record._id}`;
-          const existingExpiredTask = await Task.findOne({
-            $or: [
-              { autoGenKey },
-              {
-                complianceRecord: record._id,
-                priority: 'critical',
-                status: { $in: ['open', 'in_progress'] },
-              },
-            ],
-          });
+    const active: Record<AutoGenSource, boolean> = {
+      expiry_monitor: milestone !== undefined,
+      expired_checker: status === 'expired',
+      approval_monitor: IN_REVIEW.includes(status),
+      document_check: !!documentBlocker,
+      overdue_check: awaitingUnit && !!due && due < ctx.today,
+    };
 
-          if (!existingExpiredTask) {
-            const title = `URGENT: Compliance Expired - ${ruleName}`;
-            const description = `Statutory compliance obligation ${recordNumber} for ${location?.name || 'Unit'} expired on ${expiry.toLocaleDateString()}. Immediate renewal and statutory upload required.`;
+    // ── Close this engine's tasks whose condition has been resolved ───────────
+    const resolved = (Object.keys(active) as AutoGenSource[]).filter((source) => !active[source]);
+    const closed = await Task.updateMany(
+      {
+        complianceRecord: record._id,
+        isAutoGenerated: true,
+        autoGenSource: { $in: resolved },
+        status: { $in: ACTIVE_TASK_STATUSES },
+      },
+      { $set: { status: 'completed', completedAt: new Date() }, $unset: { completedBy: '' } }
+    );
+    result.closedTasksCount += closed.modifiedCount;
 
-            const newTask = await Task.create({
-              title,
-              description,
-              entity: entityId,
-              location: locationId,
-              complianceRecord: record._id,
-              assignedTo: targetAssigneeId,
-              priority: 'critical',
-              dueDate: new Date(),
-              status: 'open',
-              taskType: 'renewal',
-              isAutoGenerated: true,
-              autoGenSource: 'expired_checker',
-              autoGenKey,
-            });
+    const base = {
+      recordNumber,
+      entity: entityId,
+      location: locationId,
+      complianceRecord: record._id,
+    };
 
-            createdTasksCount++;
-            details.push({ type: 'expired', recordNumber, taskTitle: title });
-
-            // Notification
-            await NotificationService.dispatchNotification({
-              recipientId: targetAssigneeId,
-              type: 'compliance_expired',
-              title: `URGENT: Compliance Expired (${recordNumber})`,
-              body: description,
-              actionUrl: `/compliance/records/${record._id}`,
-              relatedComplianceRecord: record._id,
-              relatedTask: newTask._id,
-              entity: entityId,
-              emailData: {
-                ruleName,
-                recordNumber,
-                expiryDate: expiry.toLocaleDateString(),
-              },
-            });
-            notificationsCount++;
-          }
-        }
-      }
-
-      // ── TRIGGER 3: Pending Review / Approval ────────────────────────────────
-      if (record.status === 'submitted' || record.status === 'under_review') {
-        const autoGenKey = `pending_approval_${record._id}`;
-
-        const existingApprovalTask = await Task.findOne({
-          $or: [
-            { autoGenKey },
-            {
-              complianceRecord: record._id,
-              taskType: 'approval',
-              status: { $in: ['open', 'in_progress', 'pending_approval'] },
-            },
-          ],
-        });
-
-        if (!existingApprovalTask) {
-          const title = `Approval Required: ${ruleName} (${location?.name || 'Unit'})`;
-          const description = `Statutory compliance documentation for record ${recordNumber} is awaiting official reviewer inspection and sign-off.`;
-
-          const newTask = await Task.create({
-            title,
-            description,
-            entity: entityId,
-            location: locationId,
+    // Submission round distinguishes repeat review / correction cycles
+    const submissionRound =
+      active.approval_monitor || active.document_check
+        ? await Approval.countDocuments({
             complianceRecord: record._id,
-            assignedTo: targetAssigneeId,
-            priority: 'high',
-            dueDate: record.dueDate || new Date(Date.now() + 7 * 86400000),
-            status: 'pending_approval',
-            taskType: 'approval',
-            isAutoGenerated: true,
-            autoGenSource: 'approval_monitor',
-            autoGenKey,
-          });
+            action: { $in: ['Submit', 'Resubmit'] },
+          })
+        : 0;
 
-          createdTasksCount++;
-          details.push({ type: 'pending_approval', recordNumber, taskTitle: title });
-
-          await NotificationService.dispatchNotification({
-            recipientId: targetAssigneeId,
-            type: 'approval_required',
-            title: `Statutory Review Required (${recordNumber})`,
-            body: description,
-            actionUrl: `/compliance/records/${record._id}`,
-            relatedComplianceRecord: record._id,
-            relatedTask: newTask._id,
-            entity: entityId,
+    // ── TRIGGER 1: Compliance Approaching Expiry ────────────────────────────────
+    if (active.expiry_monitor && expiry && daysToExpiry !== null) {
+      await this.createAutoTask(
+        {
+          ...base,
+          detailType: 'expiring_soon',
+          title: `Compliance Expiring in ${daysToExpiry}d: ${ruleName}`,
+          description: `Statutory compliance record ${recordNumber} for ${unitName} will expire on ${expiry.toLocaleDateString()}. Please prepare and file renewal documents.`,
+          assignedTo: responsibleUserId,
+          priority: daysToExpiry <= 7 ? 'critical' : daysToExpiry <= 15 ? 'high' : 'medium',
+          dueDate: record.expiryDate!,
+          status: 'open',
+          taskType: 'renewal',
+          autoGenSource: 'expiry_monitor',
+          autoGenKey: `expiring_${record._id}_${milestone}d_${dateKey(record.expiryDate!)}`,
+          notification: {
+            type: 'compliance_expiring',
+            title: `Compliance Expiring Soon (${daysToExpiry} days)`,
             emailData: {
               ruleName,
               recordNumber,
-              locationName: location?.name || 'Assigned Unit',
+              expiryDate: expiry.toLocaleDateString(),
+              daysLeft: daysToExpiry,
             },
-          });
-          notificationsCount++;
-        }
-      }
+          },
+        },
+        result
+      );
+    }
 
-      // ── TRIGGER 4: Missing Mandatory Documents ──────────────────────────────
-      if (rule?.requiredDocuments && rule.requiredDocuments.length > 0) {
-        const mandatoryDocTypes = rule.requiredDocuments.filter((d: any) => d.isMandatory);
+    // ── TRIGGER 2: Compliance Expired ───────────────────────────────────────────
+    if (active.expired_checker) {
+      const expiredOn = expiry ? expiry.toLocaleDateString() : 'an earlier date';
+      await this.createAutoTask(
+        {
+          ...base,
+          detailType: 'expired',
+          title: `URGENT: Compliance Expired - ${ruleName}`,
+          description: `Statutory compliance obligation ${recordNumber} for ${unitName} expired on ${expiredOn}. Immediate renewal and statutory upload required.`,
+          assignedTo: responsibleUserId,
+          priority: 'critical',
+          dueDate: new Date(),
+          status: 'open',
+          taskType: 'renewal',
+          autoGenSource: 'expired_checker',
+          autoGenKey: `expired_${record._id}_${record.expiryDate ? dateKey(record.expiryDate) : 'na'}`,
+          notification: {
+            type: 'compliance_expired',
+            title: `URGENT: Compliance Expired (${recordNumber})`,
+            emailData: { ruleName, recordNumber, expiryDate: expiredOn },
+          },
+        },
+        result
+      );
+    }
 
-        if (mandatoryDocTypes.length > 0) {
-          const attachedCount = record.documents?.length || 0;
+    // ── TRIGGER 3: Pending Review / Approval ────────────────────────────────────
+    if (active.approval_monitor) {
+      await this.createAutoTask(
+        {
+          ...base,
+          detailType: 'pending_approval',
+          title: `Approval Required: ${ruleName} (${unitName})`,
+          description: `Statutory compliance documentation for record ${recordNumber} is awaiting official reviewer inspection and sign-off.`,
+          assignedTo: await this.resolveReviewer(entityId, ctx),
+          priority: 'high',
+          dueDate: record.dueDate && due! >= ctx.today ? record.dueDate : new Date(Date.now() + 7 * DAY_MS),
+          status: 'pending_approval',
+          taskType: 'approval',
+          autoGenSource: 'approval_monitor',
+          autoGenKey: `pending_approval_${record._id}_r${submissionRound}`,
+          notification: {
+            type: 'approval_required',
+            title: `Statutory Review Required (${recordNumber})`,
+            emailData: { ruleName, recordNumber, locationName: location?.name || 'Assigned Unit' },
+          },
+        },
+        result
+      );
+    }
 
-          if (attachedCount === 0 && (record.status === 'pending' || record.status === 'correction')) {
-            const autoGenKey = `missing_docs_${record._id}`;
+    // ── TRIGGER 4: Missing Mandatory Documents ──────────────────────────────────
+    if (active.document_check) {
+      await this.createAutoTask(
+        {
+          ...base,
+          detailType: 'missing_documents',
+          title: `Missing Evidence Upload: ${ruleName}`,
+          description: `Record ${recordNumber} cannot be submitted for review yet. ${documentBlocker}`,
+          assignedTo: responsibleUserId,
+          priority: 'high',
+          dueDate: record.dueDate || new Date(Date.now() + 5 * DAY_MS),
+          status: 'open',
+          taskType: 'document_upload',
+          autoGenSource: 'document_check',
+          autoGenKey: `missing_docs_${record._id}_r${submissionRound}`,
+        },
+        result
+      );
+    }
 
-            const existingDocTask = await Task.findOne({
-              $or: [
-                { autoGenKey },
-                {
-                  complianceRecord: record._id,
-                  taskType: 'document_upload',
-                  status: { $in: ['open', 'in_progress'] },
-                },
-              ],
-            });
-
-            if (!existingDocTask) {
-              const title = `Missing Evidence Upload: ${ruleName}`;
-              const description = `Record ${recordNumber} requires mandatory statutory evidence documents before it can be submitted for review.`;
-
-              const newTask = await Task.create({
-                title,
-                description,
-                entity: entityId,
-                location: locationId,
-                complianceRecord: record._id,
-                assignedTo: targetAssigneeId,
-                priority: 'high',
-                dueDate: record.dueDate || new Date(Date.now() + 5 * 86400000),
-                status: 'open',
-                taskType: 'document_upload',
-                isAutoGenerated: true,
-                autoGenSource: 'document_check',
-                autoGenKey,
-              });
-
-              createdTasksCount++;
-              details.push({ type: 'missing_documents', recordNumber, taskTitle: title });
-            }
-          }
-        }
-      }
-
-      // ── TRIGGER 5: Overdue Compliance ───────────────────────────────────────
-      if (record.dueDate && (record.status === 'pending' || record.status === 'correction')) {
-        const dueDate = new Date(record.dueDate);
-        dueDate.setHours(0, 0, 0, 0);
-
-        if (dueDate < now) {
-          const autoGenKey = `overdue_submission_${record._id}`;
-
-          const existingOverdueTask = await Task.findOne({
-            $or: [
-              { autoGenKey },
-              {
-                complianceRecord: record._id,
-                status: { $in: ['open', 'in_progress', 'overdue'] },
-                dueDate: { $lt: now },
-              },
-            ],
-          });
-
-          if (!existingOverdueTask) {
-            const title = `OVERDUE: Compliance Submission - ${ruleName}`;
-            const description = `Statutory deadline (${dueDate.toLocaleDateString()}) for record ${recordNumber} has passed without submission. Immediate action required.`;
-
-            const newTask = await Task.create({
-              title,
-              description,
-              entity: entityId,
-              location: locationId,
-              complianceRecord: record._id,
-              assignedTo: targetAssigneeId,
+    // ── TRIGGER 5: Overdue Compliance ───────────────────────────────────────────
+    if (active.overdue_check && due) {
+      await this.createAutoTask(
+        {
+          ...base,
+          detailType: 'overdue_compliance',
+          title: `OVERDUE: Compliance Submission - ${ruleName}`,
+          description: `Statutory deadline (${due.toLocaleDateString()}) for record ${recordNumber} has passed without submission. Immediate action required.`,
+          assignedTo: responsibleUserId,
+          priority: 'critical',
+          dueDate: record.dueDate!,
+          status: 'open',
+          taskType: 'manual',
+          autoGenSource: 'overdue_check',
+          autoGenKey: `overdue_submission_${record._id}_${dateKey(record.dueDate!)}`,
+          notification: {
+            type: 'task_overdue',
+            title: `Statutory Submission Overdue: ${ruleName}`,
+            emailData: {
+              taskTitle: `OVERDUE: Compliance Submission - ${ruleName}`,
+              dueDate: due.toLocaleDateString(),
               priority: 'critical',
-              dueDate: record.dueDate,
-              status: 'overdue',
-              taskType: 'manual',
-              isAutoGenerated: true,
-              autoGenSource: 'overdue_check',
-              autoGenKey,
-            });
+            },
+          },
+        },
+        result
+      );
+    }
+  }
 
-            createdTasksCount++;
-            details.push({ type: 'overdue_compliance', recordNumber, taskTitle: title });
+  private static emptyAutomationResult(): AutomationResult {
+    return {
+      scannedRecordsCount: 0,
+      createdTasksCount: 0,
+      closedTasksCount: 0,
+      notificationsCount: 0,
+      failedRecordsCount: 0,
+      details: [],
+    };
+  }
 
-            await NotificationService.dispatchNotification({
-              recipientId: targetAssigneeId,
-              type: 'task_overdue',
-              title: `Statutory Submission Overdue: ${ruleName}`,
-              body: description,
-              actionUrl: `/compliance/records/${record._id}`,
-              relatedComplianceRecord: record._id,
-              relatedTask: newTask._id,
-              entity: entityId,
-              emailData: {
-                taskTitle: title,
-                dueDate: dueDate.toLocaleDateString(),
-                priority: 'critical',
-              },
-            });
-            notificationsCount++;
-          }
-        }
+  /**
+   * Full scan across all compliance records (nightly job / manual trigger).
+   * A failure on one record is logged and does not stop the scan.
+   */
+  public static async generateComplianceTasks(): Promise<AutomationResult> {
+    const ctx = await this.buildAutomationContext();
+    const result = this.emptyAutomationResult();
+
+    const records = await this.findAutomationRecords({ status: { $ne: 'not_applicable' } });
+    result.scannedRecordsCount = records.length;
+
+    for (const record of records) {
+      try {
+        await this.evaluateRecord(record, ctx, result);
+      } catch (error) {
+        result.failedRecordsCount++;
+        console.error(`❌ [Automation] Failed to evaluate record ${record.recordNumber}:`, error);
       }
     }
 
-    return {
-      scannedRecordsCount: records.length,
-      createdTasksCount,
-      notificationsCount,
-      details,
-    };
+    return result;
+  }
+
+  /**
+   * Re-evaluates one record right after it changes (workflow action, document
+   * upload or verification) so its tasks open and close without waiting for the
+   * nightly scan. Never throws — task upkeep must not fail the triggering request.
+   */
+  public static async syncRecordTasks(recordId: string | Types.ObjectId): Promise<void> {
+    try {
+      const [record] = await this.findAutomationRecords({ _id: recordId });
+      if (!record || record.status === 'not_applicable') return;
+      await this.evaluateRecord(record, await this.buildAutomationContext(), this.emptyAutomationResult());
+    } catch (error) {
+      console.error(`❌ [Automation] Failed to sync tasks for record ${recordId}:`, error);
+    }
   }
 }
 

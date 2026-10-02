@@ -3,7 +3,7 @@ import Entity from '../models/Entity.js';
 import Location from '../models/Location.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
 import ComplianceRule from '../models/ComplianceRule.js';
-import Task from '../models/Task.js';
+import Task, { ACTIVE_TASK_STATUSES, isTaskOverdue, overdueTaskFilter } from '../models/Task.js';
 import MasterData from '../models/MasterData.js';
 
 export interface DashboardFilters {
@@ -267,12 +267,12 @@ export class DashboardService {
     const [openTasks, completedTasks, overdueTasks] = await Promise.all([
       Task.countDocuments({
         ...taskMatch,
-        status: { $in: ['open', 'in_progress', 'pending_approval'] },
+        status: { $in: ACTIVE_TASK_STATUSES },
       }),
       Task.countDocuments({ ...taskMatch, status: 'completed' }),
       Task.countDocuments({
         ...taskMatch,
-        status: 'overdue',
+        ...overdueTaskFilter(),
       }),
     ]);
 
@@ -486,7 +486,7 @@ export class DashboardService {
         if (created.getMonth() === targetMonth && created.getFullYear() === targetYear) {
           if (t.status === 'completed') {
             completedCount++;
-          } else if (t.status === 'overdue' || (t.dueDate && new Date(t.dueDate) < now)) {
+          } else if (isTaskOverdue(t, now)) {
             overdueCount++;
           } else {
             openCount++;
@@ -525,7 +525,8 @@ export class DashboardService {
     // Overdue tasks
     const urgentTasks = await Task.find({
       ...taskMatch,
-      $or: [{ priority: 'critical' }, { status: 'overdue' }],
+      status: { $in: ACTIVE_TASK_STATUSES },
+      $or: [{ priority: 'critical' }, { dueDate: { $lt: new Date() } }],
     })
       .populate('entity', 'name')
       .populate('location', 'name')

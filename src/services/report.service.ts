@@ -17,7 +17,7 @@ import { Types } from 'mongoose';
 import ComplianceRecord from '../models/ComplianceRecord.js';
 import Entity from '../models/Entity.js';
 import Location from '../models/Location.js';
-import Task from '../models/Task.js';
+import Task, { isTaskOverdue } from '../models/Task.js';
 import ComplianceRule from '../models/ComplianceRule.js';
 import MasterData from '../models/MasterData.js';
 import User from '../models/User.js';
@@ -580,9 +580,9 @@ export class ReportService {
 
     const data = tasks.map((t: any) => {
       if (t.status === 'completed') completedCount++;
-      else if (t.status === 'overdue') overdueCount++;
+      else if (isTaskOverdue(t)) overdueCount++;
       else if (t.status === 'in_progress') inProgressCount++;
-      else openCount++;
+      else if (t.status !== 'cancelled') openCount++;
 
       return {
         id: t._id.toString(),

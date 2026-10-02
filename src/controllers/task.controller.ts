@@ -1,7 +1,39 @@
 import { Request, Response, NextFunction } from 'express';
+import { Types } from 'mongoose';
 import { taskAutomationService } from '../services/taskAutomation.service.js';
+import { auditService } from '../services/audit.service.js';
+import ComplianceRecord from '../models/ComplianceRecord.js';
+import User from '../models/User.js';
+import type { ITask } from '../models/Task.js';
 import { ApiError } from '../utils/apiError.js';
-import { TaskStatus, TaskPriority } from '../types/models.js';
+import { assertInScope, getAccessScope, isInScope, toScopeFilter } from '../utils/accessScope.js';
+import {
+  createTaskSchema,
+  updateTaskSchema,
+  updateTaskStatusSchema,
+  addTaskCommentSchema,
+  taskQuerySchema,
+} from '../validations/task.validation.js';
+
+/**
+ * Tasks a user may see: everything inside their entity / location scope,
+ * plus any task assigned to them personally.
+ */
+const taskScopeFilter = (req: Request): Record<string, any> => {
+  const scope = getAccessScope(req);
+  if (scope.unrestricted) return {};
+  return {
+    $or: [toScopeFilter(scope), { assignedTo: new Types.ObjectId(req.auth!.userId) }],
+  };
+};
+
+const assertTaskAccess = (req: Request, task: ITask): void => {
+  const assignee = task.assignedTo as any;
+  const assigneeId = (assignee?._id ?? assignee)?.toString();
+  if (assigneeId === req.auth?.userId) return;
+  if (isInScope(getAccessScope(req), task)) return;
+  throw ApiError.forbidden('You are not authorized to access tasks outside your assigned entity or location.');
+};
 
 export class TaskController {
   /**
@@ -10,35 +42,12 @@ export class TaskController {
    */
   public async getTasks(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const {
-        page,
-        limit,
-        search,
-        status,
-        priority,
-        entity,
-        location,
-        complianceRecord,
-        assignedTo,
-        overdueOnly,
-        sortBy,
-        sortOrder,
-      } = req.query;
+      const query = taskQuerySchema.parse(req.query);
 
-      const result = await taskAutomationService.getTasks({
-        page: page ? parseInt(page as string, 10) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : undefined,
-        search: search as string,
-        status: status as TaskStatus,
-        priority: priority as TaskPriority,
-        entity: entity as string,
-        location: location as string,
-        complianceRecord: complianceRecord as string,
-        assignedTo: assignedTo as string,
-        overdueOnly: overdueOnly === 'true',
-        sortBy: sortBy as string,
-        sortOrder: (sortOrder as 'asc' | 'desc') || 'asc',
-      });
+      const result = await taskAutomationService.getTasks(
+        { ...query, overdueOnly: query.overdueOnly === 'true' },
+        taskScopeFilter(req)
+      );
 
       res.status(200).json({
         success: true,
@@ -56,20 +65,12 @@ export class TaskController {
    */
   public async getMyTasks(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const userId = (req as any).user?._id;
-      if (!userId) {
-        throw ApiError.unauthorized('Authentication required');
-      }
-
-      const { page, limit, status, priority, search } = req.query;
+      const query = taskQuerySchema.parse(req.query);
 
       const result = await taskAutomationService.getTasks({
-        page: page ? parseInt(page as string, 10) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : undefined,
-        assignedTo: userId.toString(),
-        status: status as TaskStatus,
-        priority: priority as TaskPriority,
-        search: search as string,
+        ...query,
+        overdueOnly: query.overdueOnly === 'true',
+        assignedTo: req.auth!.userId,
       });
 
       res.status(200).json({
@@ -88,16 +89,12 @@ export class TaskController {
    */
   public async getOverdueTasks(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { page, limit, entity, priority, search } = req.query;
+      const query = taskQuerySchema.parse(req.query);
 
-      const result = await taskAutomationService.getTasks({
-        page: page ? parseInt(page as string, 10) : undefined,
-        limit: limit ? parseInt(limit as string, 10) : undefined,
-        overdueOnly: true,
-        entity: entity as string,
-        priority: priority as TaskPriority,
-        search: search as string,
-      });
+      const result = await taskAutomationService.getTasks(
+        { ...query, overdueOnly: true },
+        taskScopeFilter(req)
+      );
 
       res.status(200).json({
         success: true,
@@ -115,8 +112,11 @@ export class TaskController {
    */
   public async getMetrics(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const userId = req.query.myOnly === 'true' ? (req as any).user?._id?.toString() : undefined;
-      const metrics = await taskAutomationService.getTaskMetrics(userId);
+      const myOnly = req.query.myOnly === 'true';
+      const metrics = await taskAutomationService.getTaskMetrics(
+        myOnly ? {} : taskScopeFilter(req),
+        myOnly ? req.auth!.userId : undefined
+      );
       res.status(200).json({
         success: true,
         data: metrics,
@@ -127,14 +127,46 @@ export class TaskController {
   }
 
   /**
+   * GET /api/tasks/assignees
+   * Users a task can be assigned to, limited to the caller's scope.
+   * Available to anyone who can create or update tasks (not only administrators).
+   */
+  public async getAssignees(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const scope = getAccessScope(req);
+      const requestedEntity =
+        typeof req.query.entity === 'string' && Types.ObjectId.isValid(req.query.entity)
+          ? req.query.entity
+          : undefined;
+      const entityId = scope.unrestricted ? requestedEntity : scope.entityId;
+
+      const filter: Record<string, any> = { status: 'active' };
+      if (entityId) {
+        // Users of the entity plus org-wide staff who are not tied to one entity
+        filter.$or = [{ entity: new Types.ObjectId(entityId) }, { entity: null }];
+      } else if (!scope.unrestricted) {
+        filter._id = new Types.ObjectId(req.auth!.userId);
+      }
+
+      const users = await User.find(filter)
+        .select('firstName lastName email role entity')
+        .populate('role', 'name code')
+        .sort({ firstName: 1, lastName: 1 })
+        .limit(200);
+
+      res.status(200).json({ success: true, data: users });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
    * GET /api/tasks/:id
    */
   public async getTaskById(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const task = await taskAutomationService.getTaskById(req.params.id);
-      if (!task) {
-        throw ApiError.notFound('Task not found');
-      }
+      const task = await taskAutomationService.getTaskById(String(req.params.id));
+      assertTaskAccess(req, task);
       res.status(200).json({
         success: true,
         data: task,
@@ -149,11 +181,37 @@ export class TaskController {
    */
   public async createTask(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const userId = (req as any).user?._id;
+      const input = createTaskSchema.parse(req.body);
+
+      let entity = input.entity;
+      let location = input.location;
+
+      // A task linked to a compliance record belongs to that record's entity & location
+      if (input.complianceRecord) {
+        const record = await ComplianceRecord.findById(input.complianceRecord).select('entity location');
+        if (!record) throw ApiError.notFound('Linked compliance record not found.');
+        entity = String(record.entity);
+        location = String(record.location);
+      }
+
+      if (!entity) {
+        throw ApiError.badRequest('Entity is required.');
+      }
+      assertInScope(req, { entity, location }, 'You cannot create tasks outside your assigned entity or location.');
+
+      const assignee = await User.exists({ _id: input.assignedTo, status: 'active' });
+      if (!assignee) {
+        throw ApiError.badRequest('Assignee must be an active user.');
+      }
+
       const task = await taskAutomationService.createTask({
-        ...req.body,
-        createdBy: userId,
+        ...input,
+        entity,
+        location,
+        createdBy: req.auth!.userId,
       });
+
+      await auditService.logTaskCreated(task, req);
 
       res.status(201).json({
         success: true,
@@ -170,8 +228,10 @@ export class TaskController {
    */
   public async updateTask(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const userId = (req as any).user?._id;
-      const task = await taskAutomationService.updateTask(req.params.id, req.body, userId);
+      const input = updateTaskSchema.parse(req.body);
+      assertTaskAccess(req, await taskAutomationService.getTaskById(String(req.params.id)));
+
+      const task = await taskAutomationService.updateTask(String(req.params.id), input, req.auth!.userId);
       res.status(200).json({
         success: true,
         message: 'Task updated successfully',
@@ -187,17 +247,10 @@ export class TaskController {
    */
   public async updateTaskStatus(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const userId = (req as any).user?._id;
-      const { status } = req.body;
-      if (!status) {
-        throw ApiError.badRequest('Status is required');
-      }
+      const { status } = updateTaskStatusSchema.parse(req.body);
+      assertTaskAccess(req, await taskAutomationService.getTaskById(String(req.params.id)));
 
-      const task = await taskAutomationService.updateTask(
-        req.params.id,
-        { status },
-        userId
-      );
+      const task = await taskAutomationService.updateTask(String(req.params.id), { status }, req.auth!.userId);
 
       res.status(200).json({
         success: true,
@@ -210,11 +263,45 @@ export class TaskController {
   }
 
   /**
+   * POST /api/tasks/:id/comments
+   */
+  public async addComment(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { text } = addTaskCommentSchema.parse(req.body);
+      assertTaskAccess(req, await taskAutomationService.getTaskById(String(req.params.id)));
+
+      const task = await taskAutomationService.addComment(String(req.params.id), text, req.auth!.userId);
+
+      res.status(201).json({
+        success: true,
+        message: 'Comment added',
+        data: task,
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
    * DELETE /api/tasks/:id
    */
   public async deleteTask(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      await taskAutomationService.deleteTask(req.params.id);
+      const task = await taskAutomationService.getTaskById(String(req.params.id));
+      assertTaskAccess(req, task);
+
+      await taskAutomationService.deleteTask(String(req.params.id));
+
+      await auditService.logMutation({
+        req,
+        action: 'TASK_DELETED',
+        module: 'tasks',
+        entityType: 'Task',
+        recordId: task._id,
+        previousValue: { title: task.title, status: task.status, priority: task.priority },
+        description: `Deleted task '${task.title}'`,
+      });
+
       res.status(200).json({
         success: true,
         message: 'Task deleted successfully',

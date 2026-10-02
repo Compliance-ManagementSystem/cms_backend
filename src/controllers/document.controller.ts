@@ -16,6 +16,7 @@ import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { assertInScope, getAccessScope, isInScope } from '../utils/accessScope.js';
 import { auditService } from '../services/audit.service.js';
+import { TaskAutomationService } from '../services/taskAutomation.service.js';
 
 // Multer has already written the file by the time the controller runs,
 // so a rejected request must remove it before failing.
@@ -133,6 +134,7 @@ export const uploadDocument = asyncHandler(async (req: Request, res: Response) =
   }
 
   await auditService.logDocumentUploaded(document, req);
+  if (complianceRecordId) await TaskAutomationService.syncRecordTasks(complianceRecordId);
 
   return ApiResponse.created(res, { document }, 'Document uploaded successfully');
 });
@@ -200,6 +202,7 @@ export const replaceDocument = asyncHandler(async (req: Request, res: Response) 
   await document.save();
 
   await auditService.logDocumentReplaced(document, newVersionNumber - 1, req);
+  if (document.complianceRecord) await TaskAutomationService.syncRecordTasks(document.complianceRecord as Types.ObjectId);
 
   return ApiResponse.success(res, { document }, `Document version v${newVersionNumber} uploaded successfully`);
 });
@@ -333,6 +336,7 @@ export const verifyDocument = asyncHandler(async (req: Request, res: Response) =
     description: `Document "${document.name}" marked as ${verificationStatus}`,
     metadata: { notes },
   });
+  if (document.complianceRecord) await TaskAutomationService.syncRecordTasks(document.complianceRecord as Types.ObjectId);
 
   return ApiResponse.success(res, { document }, `Document marked as ${verificationStatus}`);
 });
@@ -370,6 +374,7 @@ export const deleteDocument = asyncHandler(async (req: Request, res: Response) =
     newValue: { status: 'archived' },
     description: `Archived document "${document.name}"`,
   });
+  if (document.complianceRecord) await TaskAutomationService.syncRecordTasks(document.complianceRecord as Types.ObjectId);
 
   return ApiResponse.success(res, null, 'Document archived successfully');
 });

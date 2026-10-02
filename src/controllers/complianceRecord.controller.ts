@@ -25,6 +25,7 @@ import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { assertInScope, getAccessScope, toScopeFilter } from '../utils/accessScope.js';
 import { auditService } from '../services/audit.service.js';
+import { TaskAutomationService } from '../services/taskAutomation.service.js';
 
 // ── 1. Get Compliance Records (Paginated, Filtered & Real Counts) ──────────────
 export const getComplianceRecords = asyncHandler(async (req: Request, res: Response) => {
@@ -297,6 +298,7 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
   await record.save();
 
   await auditService.logComplianceUpdated(record, previousValue, req);
+  await TaskAutomationService.syncRecordTasks(record._id);
 
   const populated = await ComplianceRecord.findById(record._id)
     .populate('entity', 'name code entityCode')
@@ -368,6 +370,7 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
   await record.save();
 
   await auditService.logStatusChanged(record, previousStatus, status, req);
+  await TaskAutomationService.syncRecordTasks(record._id);
 
   const updatedRecord = await ComplianceRecord.findById(id)
     .populate('entity', 'name code entityCode')
@@ -491,6 +494,8 @@ export const executeWorkflowAction = asyncHandler(async (req: Request, res: Resp
       entityId: req.auth!.entityId,
     },
   });
+
+  await TaskAutomationService.syncRecordTasks(String(id));
 
   return ApiResponse.success(
     res,

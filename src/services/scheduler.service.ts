@@ -29,24 +29,51 @@ class SchedulerService {
    * Programmatic / on-demand trigger of compliance checks
    */
   public async runComplianceChecks(): Promise<{
+    recordsScanned: number;
     tasksCreated: number;
+    tasksClosed: number;
     notificationsSent: number;
+    recordsFailed: number;
     summary: Record<string, number>;
   }> {
     if (this.isRunning) {
       console.log('⚠️ [Scheduler] Compliance checks already in progress, skipping concurrent run.');
-      return { tasksCreated: 0, notificationsSent: 0, summary: {} };
+      return {
+        recordsScanned: 0,
+        tasksCreated: 0,
+        tasksClosed: 0,
+        notificationsSent: 0,
+        recordsFailed: 0,
+        summary: {},
+      };
     }
 
     this.isRunning = true;
     const startTime = Date.now();
 
     try {
-      const result = await taskAutomationService.generateComplianceTasks();
+      const scan = await taskAutomationService.generateComplianceTasks();
+
+      // Tasks created per trigger type
+      const summary: Record<string, number> = {};
+      scan.details.forEach((d) => {
+        summary[d.type] = (summary[d.type] || 0) + 1;
+      });
+
+      const result = {
+        recordsScanned: scan.scannedRecordsCount,
+        tasksCreated: scan.createdTasksCount,
+        tasksClosed: scan.closedTasksCount,
+        notificationsSent: scan.notificationsCount,
+        recordsFailed: scan.failedRecordsCount,
+        summary,
+      };
+
       const elapsed = Date.now() - startTime;
       console.log(
         `✅ [Scheduler] Compliance check completed in ${elapsed}ms: ` +
-        `${result.tasksCreated} tasks created, ${result.notificationsSent} notifications sent.`
+        `${result.tasksCreated} tasks created, ${result.tasksClosed} closed, ` +
+        `${result.notificationsSent} notifications sent, ${result.recordsFailed} records failed.`
       );
       return result;
     } catch (error) {
