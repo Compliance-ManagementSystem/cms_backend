@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { Types } from 'mongoose';
 import { taskAutomationService } from '../services/taskAutomation.service.js';
 import { auditService } from '../services/audit.service.js';
+import { LookupService } from '../services/lookup.service.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
 import User from '../models/User.js';
 import type { ITask } from '../models/Task.js';
@@ -133,26 +134,11 @@ export class TaskController {
    */
   public async getAssignees(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const scope = getAccessScope(req);
-      const requestedEntity =
-        typeof req.query.entity === 'string' && Types.ObjectId.isValid(req.query.entity)
-          ? req.query.entity
-          : undefined;
-      const entityId = scope.unrestricted ? requestedEntity : scope.entityId;
-
-      const filter: Record<string, any> = { status: 'active' };
-      if (entityId) {
-        // Users of the entity plus org-wide staff who are not tied to one entity
-        filter.$or = [{ entity: new Types.ObjectId(entityId) }, { entity: null }];
-      } else if (!scope.unrestricted) {
-        filter._id = new Types.ObjectId(req.auth!.userId);
-      }
-
-      const users = await User.find(filter)
-        .select('firstName lastName email role entity')
-        .populate('role', 'name code')
-        .sort({ firstName: 1, lastName: 1 })
-        .limit(200);
+      const users = await LookupService.getAssignableUsers(
+        getAccessScope(req),
+        req.auth!.userId,
+        req.query.entity as string | undefined
+      );
 
       res.status(200).json({ success: true, data: users });
     } catch (error) {

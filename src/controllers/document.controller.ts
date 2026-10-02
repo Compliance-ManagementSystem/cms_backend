@@ -16,6 +16,7 @@ import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { assertInScope, getAccessScope, isInScope } from '../utils/accessScope.js';
 import { auditService } from '../services/audit.service.js';
+import { DocumentService } from '../services/document.service.js';
 import { TaskAutomationService } from '../services/taskAutomation.service.js';
 
 // Multer has already written the file by the time the controller runs,
@@ -74,56 +75,22 @@ export const uploadDocument = asyncHandler(async (req: Request, res: Response) =
     );
   }
 
-  const fileUrl = `/uploads/compliance-documents/${req.file.filename}`;
-  const uploadedBy = req.auth?.userId;
+  const uploadedBy = req.auth!.userId;
 
-  // Build initial version subdocument
-  const initialVersion = {
-    version: 1,
-    fileUrl,
-    fileName: req.file.originalname,
-    fileSize: req.file.size,
-    mimeType: req.file.mimetype,
-    uploadedBy: new Types.ObjectId(uploadedBy),
-    uploadedAt: new Date(),
-    notes: 'Initial document upload',
-    status: 'active' as const,
-  };
-
-  const document = new DocumentModel({
+  const document = await DocumentService.createFromUpload({
+    file: req.file,
+    userId: uploadedBy,
+    entityId,
+    locationId,
+    complianceRecordId,
     name: docName,
-    title: docName,
-    type: type || 'COMPLIANCE_EVIDENCE',
-    documentType: documentType || undefined,
+    type,
+    documentType,
     description,
-    entity: new Types.ObjectId(entityId),
-    location: locationId ? new Types.ObjectId(locationId) : undefined,
-    complianceRecord: complianceRecordId ? new Types.ObjectId(complianceRecordId) : undefined,
-    relatedTo: complianceRecordId
-      ? { model: 'ComplianceRecord', id: new Types.ObjectId(complianceRecordId) }
-      : locationId
-      ? { model: 'Location', id: new Types.ObjectId(locationId) }
-      : { model: 'Entity', id: new Types.ObjectId(entityId) },
-    version: 1,
-    currentVersion: 1,
-    fileUrl,
-    fileName: req.file.originalname,
-    fileSize: req.file.size,
-    mimeType: req.file.mimetype,
-    latestVersionUrl: fileUrl,
-    uploadedBy: new Types.ObjectId(uploadedBy),
-    uploadedAt: new Date(),
-    expiryDate: expiryDate ? new Date(expiryDate) : undefined,
-    issueDate: issueDate ? new Date(issueDate) : undefined,
-    verificationStatus: 'pending',
-    versions: [initialVersion],
-    tags: tags ? (Array.isArray(tags) ? tags : [tags]) : [],
-    status: 'active',
-    createdBy: new Types.ObjectId(uploadedBy),
-    updatedBy: new Types.ObjectId(uploadedBy),
+    expiryDate,
+    issueDate,
+    tags,
   });
-
-  await document.save();
 
   // If attached to a ComplianceRecord, append to record's documents array
   if (complianceRecordId) {
@@ -158,48 +125,10 @@ export const replaceDocument = asyncHandler(async (req: Request, res: Response) 
     );
   }
 
-  const notes = req.body.notes || 'Replaced document file';
-  const newVersionNumber = (document.currentVersion || document.version || 1) + 1;
-  const fileUrl = `/uploads/compliance-documents/${req.file.filename}`;
-  const uploadedBy = req.auth?.userId;
-
-  // Mark all existing versions as superseded
-  document.versions.forEach((v) => {
-    v.status = 'superseded';
+  const newVersionNumber = await DocumentService.addVersion(document, req.file, req.auth!.userId, {
+    notes: req.body.notes,
+    expiryDate: req.body.expiryDate,
   });
-
-  // Append new version
-  document.versions.push({
-    _id: new Types.ObjectId(),
-    version: newVersionNumber,
-    fileUrl,
-    fileName: req.file.originalname,
-    fileSize: req.file.size,
-    mimeType: req.file.mimetype,
-    uploadedBy: new Types.ObjectId(uploadedBy),
-    uploadedAt: new Date(),
-    notes,
-    status: 'active',
-  } as any);
-
-  // Update active top-level pointer
-  document.currentVersion = newVersionNumber;
-  document.version = newVersionNumber;
-  document.fileUrl = fileUrl;
-  document.fileName = req.file.originalname;
-  document.fileSize = req.file.size;
-  document.mimeType = req.file.mimetype;
-  document.latestVersionUrl = fileUrl;
-  document.uploadedBy = new Types.ObjectId(uploadedBy);
-  document.uploadedAt = new Date();
-  document.verificationStatus = 'pending'; // reset verification on replacement
-  document.updatedBy = new Types.ObjectId(uploadedBy);
-
-  if (req.body.expiryDate) {
-    document.expiryDate = new Date(req.body.expiryDate);
-  }
-
-  await document.save();
 
   await auditService.logDocumentReplaced(document, newVersionNumber - 1, req);
   if (document.complianceRecord) await TaskAutomationService.syncRecordTasks(document.complianceRecord as Types.ObjectId);

@@ -13,6 +13,8 @@ import automationRoutes from './automation.routes.js';
 import dashboardRoutes from './dashboard.routes.js';
 import reportRoutes from './report.routes.js';
 import auditRoutes from './audit.routes.js';
+import lookupRoutes from './lookup.routes.js';
+import licenceRoutes from './licence.routes.js';
 
 const router = Router();
 
@@ -31,6 +33,8 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/reports', reportRoutes);
 router.use('/audit-logs', auditRoutes);
 router.use('/audit', auditRoutes);
+router.use('/lookups', lookupRoutes);
+router.use('/licences', licenceRoutes);
 
 export default router;
 

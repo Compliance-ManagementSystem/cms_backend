@@ -79,6 +79,20 @@ export const toScopeFilter = (scope: AccessScope): Record<string, any> => {
   return filter;
 };
 
+/** Mongo filter for the Location collection itself (keyed by `_id`, not `location`) */
+export const toLocationScopeFilter = (scope: AccessScope): Record<string, any> => {
+  if (scope.unrestricted) return {};
+
+  const filter: Record<string, any> = {};
+  if (scope.entityId) {
+    filter.entity = new Types.ObjectId(scope.entityId);
+  }
+  if (scope.locationIds) {
+    filter._id = { $in: scope.locationIds.map((id) => new Types.ObjectId(id)) };
+  }
+  return filter;
+};
+
 export const isInScope = (scope: AccessScope, target: ScopedTarget): boolean => {
   if (scope.unrestricted) return true;
 

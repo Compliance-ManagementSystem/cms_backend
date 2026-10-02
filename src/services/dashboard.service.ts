@@ -7,6 +7,16 @@ import Task, { ACTIVE_TASK_STATUSES, overdueTaskFilter } from '../models/Task.js
 import MasterData from '../models/MasterData.js';
 import User from '../models/User.js';
 import { AccessScope, toScopeFilter } from '../utils/accessScope.js';
+import {
+  HealthBucket,
+  HealthCounts,
+  classifyRecord,
+  emptyCounts,
+  withPercentage,
+} from '../utils/complianceHealth.js';
+
+export type { HealthBucket, HealthCounts };
+export { EXPIRING_SOON_DAYS } from '../utils/complianceHealth.js';
 
 export interface DashboardFilters {
   state?: string;
@@ -17,27 +27,6 @@ export interface DashboardFilters {
 
 export type DashboardLevel = 'national' | 'state' | 'entity' | 'location';
 export type DashboardRating = 'green' | 'yellow' | 'orange' | 'red';
-
-/**
- * Every compliance record falls into exactly one health bucket:
- *   - compliant    : approved and valid beyond the expiring-soon window
- *   - expiringSoon : approved and valid, but expires within EXPIRING_SOON_DAYS
- *   - pending      : somewhere in the workflow (not yet approved, rejected, in correction)
- *   - expired      : validity has lapsed
- */
-export type HealthBucket = 'compliant' | 'expiringSoon' | 'pending' | 'expired';
-
-export const EXPIRING_SOON_DAYS = 30;
-
-export interface HealthCounts {
-  total: number;
-  compliant: number;
-  expiringSoon: number;
-  pending: number;
-  expired: number;
-  /** Share of records that are currently valid (compliant + expiring soon) */
-  percentage: number;
-}
 
 export interface DashboardKPIs extends Omit<HealthCounts, 'percentage'> {
   /** null when there are no records to score */
@@ -131,36 +120,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-const classifyRecord = (
-  record: { status: string; expiryDate?: Date | null },
-  now: Date
-): HealthBucket => {
-  if (record.status === 'expired') return 'expired';
-
-  if (record.status === 'approved' || record.status === 'expiring_soon') {
-    const expiry = record.expiryDate ? new Date(record.expiryDate) : null;
-    if (expiry && expiry < now) return 'expired'; // lapsed, nightly job has not flipped it yet
-    if (expiry && expiry.getTime() - now.getTime() <= EXPIRING_SOON_DAYS * DAY_MS) return 'expiringSoon';
-    return 'compliant';
-  }
-
-  return 'pending';
-};
-
-const emptyCounts = (): Omit<HealthCounts, 'percentage'> => ({
-  total: 0,
-  compliant: 0,
-  expiringSoon: 0,
-  pending: 0,
-  expired: 0,
-});
-
-const withPercentage = (counts: Omit<HealthCounts, 'percentage'>): HealthCounts => ({
-  ...counts,
-  percentage:
-    counts.total > 0 ? Math.round(((counts.compliant + counts.expiringSoon) / counts.total) * 100) : 0,
-});
 
 /** Entities and locations the caller is allowed to see */
 const entityScopeFilter = (scope: AccessScope): Record<string, any> =>
