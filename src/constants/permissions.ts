@@ -156,6 +156,7 @@ export const ROLE_DEFINITIONS: Record<RoleCode, RoleDefinition> = {
     description: 'System administrator across all entities with operational and user management privileges.',
     isSystem: true,
     permissions: [
+      PERMISSIONS.ENTITY_CREATE,
       PERMISSIONS.ENTITY_READ,
       PERMISSIONS.ENTITY_UPDATE,
       PERMISSIONS.LOCATION_CREATE,
@@ -203,6 +204,7 @@ export const ROLE_DEFINITIONS: Record<RoleCode, RoleDefinition> = {
     isSystem: true,
     permissions: [
       PERMISSIONS.ENTITY_READ,
+      PERMISSIONS.ENTITY_UPDATE,
       PERMISSIONS.LOCATION_CREATE,
       PERMISSIONS.LOCATION_READ,
       PERMISSIONS.LOCATION_UPDATE,
@@ -241,6 +243,7 @@ export const ROLE_DEFINITIONS: Record<RoleCode, RoleDefinition> = {
     description: 'Manages an assigned physical unit/clinic. Coordinates onsite tasks, evidence uploads, and renewal requests.',
     isSystem: true,
     permissions: [
+      PERMISSIONS.ENTITY_READ,
       PERMISSIONS.LOCATION_READ,
       PERMISSIONS.COMPLIANCE_RECORD_READ,
       PERMISSIONS.COMPLIANCE_RECORD_SUBMIT,
