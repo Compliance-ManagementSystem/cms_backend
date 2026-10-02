@@ -35,7 +35,8 @@ export const createComplianceRuleSchema = z.object({
   applicableStates: z.array(z.string()).default([]),
   frequency: z.string().min(1, 'Compliance frequency is required').trim(),
   renewalFrequency: z.string().optional(),
-  renewalCycle: z.coerce.number().int().positive().default(365),
+  // Allow 0 for one-time (ONETIME) compliance rules — was .positive() which blocked 0
+  renewalCycle: z.coerce.number().int().min(0).default(365),
   requiredDocuments: z.array(requiredDocumentSchema).default([]),
   mandatory: z.boolean().default(true),
   active: z.boolean().default(true),
@@ -43,6 +44,8 @@ export const createComplianceRuleSchema = z.object({
   escalationRules: escalationRulesSchema.optional(),
   priority: z.enum(['low', 'medium', 'high', 'critical']).default('medium'),
   status: z.enum(['active', 'inactive', 'archived']).default('active'),
+  requiresApproval: z.boolean().default(false),
+  approvalLevels: z.number().int().min(1).max(5).default(1),
 });
 
 export const updateComplianceRuleSchema = createComplianceRuleSchema.partial();

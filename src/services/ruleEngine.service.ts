@@ -49,8 +49,8 @@ export class RuleEngineService {
       stateMatch: true,
     };
 
-    // 1. Rule Active Check
-    if (rule.status !== 'active' && rule.active === false) {
+    // 1. Rule Active Check — use || so either condition alone marks rule inactive
+    if (rule.status !== 'active' || rule.active === false) {
       matches.statusMatch = false;
       reasons.push('Rule is currently inactive or archived.');
     }
@@ -151,9 +151,8 @@ export class RuleEngineService {
         matches.stateMatch = false;
         reasons.push('Rule requires specific State jurisdiction, but target has no State defined in address.');
       } else {
-        const stateMatches = applicableStates.some(
-          (s) => s === targetState || targetState.includes(s) || s.includes(targetState)
-        );
+        // Use exact match only — substring matching is unsafe for jurisdiction enforcement
+        const stateMatches = applicableStates.includes(targetState);
 
         if (!stateMatches) {
           matches.stateMatch = false;
@@ -216,13 +215,14 @@ export class RuleEngineService {
         .lean();
     }
 
-    // Load all active compliance rules with populated master data
+    // Load all active compliance rules with populated master data (bounded to prevent memory exhaustion)
     const allRules = await ComplianceRule.find({ status: 'active' })
       .populate('category', 'code label')
       .populate('frequency', 'code label')
       .populate('applicableEntityTypes', 'code label')
       .populate('applicableLocationTypes', 'code label')
       .populate('requiredDocuments.documentType', 'code label')
+      .limit(500)
       .lean();
 
     const applicableRules: EvaluationResult[] = [];

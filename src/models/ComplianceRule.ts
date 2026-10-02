@@ -245,6 +245,14 @@ complianceRuleSchema.pre('save', function (next) {
     this.active = false;
   }
 
+  // Sync reminderDaysBefore with notificationRules.reminderDays
+  if (this.notificationRules?.reminderDays?.length) {
+    this.reminderDaysBefore = [...this.notificationRules.reminderDays];
+  } else if (this.reminderDaysBefore?.length) {
+    if (!this.notificationRules) (this as any).notificationRules = {};
+    this.notificationRules.reminderDays = [...this.reminderDaysBefore];
+  }
+
   next();
 });
 

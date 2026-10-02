@@ -13,6 +13,7 @@ import {
   createComplianceRule,
   updateComplianceRule,
   toggleRuleStatus,
+  archiveComplianceRule,
   deleteComplianceRule,
   evaluateRuleApplicability,
 } from '../controllers/complianceRule.controller.js';
@@ -35,6 +36,7 @@ router.get(
   getComplianceRules
 );
 
+// NOTE: /evaluate must be before /:id so Express doesn't treat 'evaluate' as an ID
 router.post(
   '/evaluate',
   requirePermission('compliance_rule:read'),
@@ -62,10 +64,18 @@ router.put(
   updateComplianceRule
 );
 
+// Toggle active ↔ inactive
 router.patch(
   '/:id/status',
   requirePermission('compliance_rule:update'),
   toggleRuleStatus
+);
+
+// Archive (moves to archived state — distinct from inactive) — Feature F fix
+router.patch(
+  '/:id/archive',
+  requirePermission('compliance_rule:update'),
+  archiveComplianceRule
 );
 
 router.delete(

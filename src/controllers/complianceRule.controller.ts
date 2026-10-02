@@ -10,6 +10,7 @@ import mongoose from 'mongoose';
 import ComplianceRule from '../models/ComplianceRule.js';
 import MasterData from '../models/MasterData.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
+import Task from '../models/Task.js';
 import { RuleEngineService } from '../services/ruleEngine.service.js';
 import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
@@ -91,20 +92,32 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
     }
   }
 
-  // Search by text
+  // Search by text — use $and to avoid overwriting state $or filter
   if (search) {
     const searchRegex = new RegExp(search, 'i');
-    query.$or = [
+    const searchConditions = [
       { name: searchRegex },
       { code: searchRegex },
       { description: searchRegex },
       { legalReference: searchRegex },
     ];
+    if (query.$or) {
+      // Combine existing $or (state/entityType filter) with search using $and
+      query.$and = [
+        ...(query.$and || []),
+        { $or: query.$or },
+        { $or: searchConditions },
+      ];
+      delete query.$or;
+    } else {
+      query.$or = searchConditions;
+    }
   }
 
   const skip = (page - 1) * limit;
 
-  const [rules, total] = await Promise.all([
+  // Run paginated query + total count + aggregate stats in parallel
+  const [rules, total, activeCount, mandatoryCount] = await Promise.all([
     ComplianceRule.find(query)
       .populate('category', 'code label description')
       .populate('frequency', 'code label')
@@ -116,7 +129,13 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
       .limit(limit)
       .lean(),
     ComplianceRule.countDocuments(query),
+    ComplianceRule.countDocuments({ ...query, status: 'active' }),
+    ComplianceRule.countDocuments({ ...query, mandatory: true }),
   ]);
+
+  // Compute unique categories from the full filtered set
+  const categoryAgg = await ComplianceRule.distinct('category', query);
+  const uniqueCategoriesCount = categoryAgg.length;
 
   return ApiResponse.success(res, {
     rules,
@@ -125,6 +144,12 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
       page,
       limit,
       totalPages: Math.ceil(total / limit),
+    },
+    stats: {
+      total,
+      activeCount,
+      mandatoryCount,
+      uniqueCategoriesCount,
     },
   });
 });
@@ -175,6 +200,8 @@ export const createComplianceRule = asyncHandler(async (req: Request, res: Respo
     escalationRules,
     priority = 'medium',
     status = 'active',
+    requiresApproval = false,
+    approvalLevels = 1,
   } = req.body;
 
   // 1. Resolve Category from Master Data
@@ -312,6 +339,8 @@ export const createComplianceRule = asyncHandler(async (req: Request, res: Respo
       autoTaskCreation: true,
     },
     priority,
+    requiresApproval: Boolean(requiresApproval),
+    approvalLevels: Number(approvalLevels) || 1,
     createdBy: req.user?._id || req.auth?.userId,
     updatedBy: req.user?._id || req.auth?.userId,
   });
@@ -371,6 +400,8 @@ export const updateComplianceRule = asyncHandler(async (req: Request, res: Respo
     escalationRules,
     priority,
     status,
+    requiresApproval,
+    approvalLevels,
   } = req.body;
 
   // Resolve Category if updated
@@ -488,6 +519,8 @@ export const updateComplianceRule = asyncHandler(async (req: Request, res: Respo
 
   if (notificationRules !== undefined) existingRule.notificationRules = notificationRules;
   if (escalationRules !== undefined) existingRule.escalationRules = escalationRules;
+  if (requiresApproval !== undefined) existingRule.requiresApproval = Boolean(requiresApproval);
+  if (approvalLevels !== undefined) existingRule.approvalLevels = Number(approvalLevels) || 1;
 
   existingRule.updatedBy = req.user?._id || req.auth?.userId;
   await existingRule.save();
@@ -562,12 +595,26 @@ export const deleteComplianceRule = asyncHandler(async (req: Request, res: Respo
     throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
   }
 
-  // Safety check: Prevent deletion if historical compliance records exist
+  // Safety check 1: block deletion if compliance records exist for this rule
   const recordsCount = await ComplianceRecord.countDocuments({ complianceRule: id });
   if (recordsCount > 0) {
     throw ApiError.badRequest(
       `Cannot delete compliance rule "${rule.name}" because it is referenced by ${recordsCount} existing compliance record(s). Deactivate the rule instead.`
     );
+  }
+
+  // Safety check 2: block deletion if active tasks reference compliance records for this rule
+  const complianceRecordIds = await ComplianceRecord.distinct('_id', { complianceRule: id });
+  if (complianceRecordIds.length > 0) {
+    const taskCount = await Task.countDocuments({
+      complianceRecord: { $in: complianceRecordIds },
+      status: { $in: ['open', 'in_progress', 'pending_approval'] },
+    });
+    if (taskCount > 0) {
+      throw ApiError.badRequest(
+        `Cannot delete compliance rule "${rule.name}" because ${taskCount} active task(s) reference its compliance records. Complete or cancel those tasks first.`
+      );
+    }
   }
 
   await ComplianceRule.findByIdAndDelete(id);
@@ -611,3 +658,40 @@ export const evaluateRuleApplicability = asyncHandler(async (req: Request, res: 
 
   return ApiResponse.success(res, result);
 });
+
+// ── 8. Archive Compliance Rule (Feature F) ────────────────────────────────────
+export const archiveComplianceRule = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw ApiError.badRequest('Invalid Compliance Rule ID format');
+  }
+
+  const rule = await ComplianceRule.findById(id);
+  if (!rule) {
+    throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
+  }
+
+  if (rule.status === 'archived') {
+    throw ApiError.badRequest(`Rule "${rule.name}" is already archived`);
+  }
+
+  rule.status = 'archived';
+  rule.active = false;
+  rule.updatedBy = req.user?._id || req.auth?.userId;
+  await rule.save();
+
+  await logAuditEvent({
+    action: 'UPDATE',
+    resource: 'ComplianceRule',
+    resourceId: id,
+    userId: (req.user?._id || req.auth?.userId)?.toString(),
+    userEmail: req.user?.email || (req.auth as any)?.email,
+    userRole: (req.user?.role as any)?.code || req.auth?.role,
+    description: `Archived compliance rule "${rule.name}" (${rule.code})`,
+    req,
+  });
+
+  return ApiResponse.success(res, { rule }, `Compliance rule "${rule.name}" has been archived`);
+});
+
