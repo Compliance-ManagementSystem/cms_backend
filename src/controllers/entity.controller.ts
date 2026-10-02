@@ -25,7 +25,7 @@ import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { auditService } from '../services/audit.service.js';
 import { getAccessScope } from '../utils/accessScope.js';
-import { summariseHealth } from '../utils/complianceHealth.js';
+import { expiredRecordCondition, summariseHealth } from '../utils/complianceHealth.js';
 import { entityQuerySchema } from '../validations/entity.validation.js';
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -145,7 +145,7 @@ const auditSnapshot = (entity: IEntity) => ({
 
 // ── 1. Get Paginated Entities with Search, Filter & Sorting ───────────────────
 export const getEntities = asyncHandler(async (req: Request, res: Response) => {
-  const { page, limit, search, entityType, status, state, district, city, sortBy, sortOrder } =
+  const { page, limit, search, entityType, status, state, district, city, attention, sortBy, sortOrder } =
     entityQuerySchema.parse(req.query);
 
   // RBAC scoping: users tied to an entity only ever see that entity
@@ -155,7 +155,7 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
     if (!scope.entityId) {
       return ApiResponse.success(res, {
         entities: [],
-        pagination: { total: 0, activeCount: 0, totalLocations: 0, page, limit, totalPages: 0 },
+        pagination: { total: 0, activeCount: 0, inactiveCount: 0, attentionCount: 0, totalLocations: 0, page, limit, totalPages: 0 },
       });
     }
     conditions.push({ _id: new Types.ObjectId(scope.entityId) });
@@ -181,9 +181,19 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
   if (district) conditions.push({ 'address.district': exactMatch(district) });
   if (city) conditions.push({ 'address.city': exactMatch(city) });
 
+  // Entities with at least one expired compliance record need attention.
+  // The count ignores the attention filter itself so the card stays meaningful.
+  const baseIds = await Entity.find(conditions.length > 0 ? { $and: conditions } : {}).distinct('_id');
+  const attentionIds = await ComplianceRecord.distinct('entity', {
+    $and: [{ entity: { $in: baseIds } }, expiredRecordCondition()],
+  });
+  if (attention === 'true') {
+    conditions.push({ _id: { $in: attentionIds } });
+  }
+
   const query = conditions.length > 0 ? { $and: conditions } : {};
 
-  const [entities, total, activeCount, matchingIds] = await Promise.all([
+  const [entities, total, activeCount, inactiveCount, matchingIds] = await Promise.all([
     Entity.find(query)
       .populate('entityType', 'code label')
       .populate('owner', 'firstName lastName email')
@@ -195,11 +205,12 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
       .lean(),
     Entity.countDocuments(query),
     Entity.countDocuments({ $and: [...conditions, { status: 'active' }] }),
+    Entity.countDocuments({ $and: [...conditions, { status: 'inactive' }] }),
     Entity.find(query).distinct('_id'),
   ]);
 
   const entityIds = entities.map((e) => e._id);
-  const [totalLocations, locationCounts, complianceCounts] = await Promise.all([
+  const [totalLocations, locationCounts, complianceCounts, healthRecords] = await Promise.all([
     Location.countDocuments({ entity: { $in: matchingIds } }),
     Location.aggregate([
       { $match: { entity: { $in: entityIds } } },
@@ -209,7 +220,17 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
       { $match: { entity: { $in: entityIds } } },
       { $group: { _id: '$entity', count: { $sum: 1 } } },
     ]),
+    ComplianceRecord.find({ entity: { $in: entityIds }, status: { $ne: 'not_applicable' } })
+      .select('entity status expiryDate')
+      .lean(),
   ]);
+
+  const recordsByEntity = new Map<string, Array<{ status: string; expiryDate?: Date | null }>>();
+  for (const record of healthRecords) {
+    const key = String(record.entity);
+    if (!recordsByEntity.has(key)) recordsByEntity.set(key, []);
+    recordsByEntity.get(key)!.push(record);
+  }
 
   const locCountMap = new Map<string, number>(locationCounts.map((c) => [c._id.toString(), c.count]));
   const compCountMap = new Map<string, number>(complianceCounts.map((c) => [c._id.toString(), c.count]));
@@ -220,10 +241,13 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
       entityCode: ent.code,
       locationCount: locCountMap.get(ent._id.toString()) || 0,
       complianceCount: compCountMap.get(ent._id.toString()) || 0,
+      health: summariseHealth(recordsByEntity.get(ent._id.toString()) || []),
     })),
     pagination: {
       total,
       activeCount,
+      inactiveCount,
+      attentionCount: attentionIds.length,
       totalLocations,
       page,
       limit,

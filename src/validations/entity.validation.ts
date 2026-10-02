@@ -89,6 +89,7 @@ export const entityQuerySchema = z.object({
   state: z.string().trim().optional(),
   district: z.string().trim().optional(),
   city: z.string().trim().optional(),
+  attention: z.enum(['true', 'false']).optional(),
   sortBy: z.enum(['name', 'code', 'status', 'createdAt', 'updatedAt']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
