@@ -192,7 +192,10 @@ export class TaskAutomationService {
     }
 
     if (params.status && params.status !== 'all') {
-      conditions.push({ status: params.status });
+      // Older tasks stored as "overdue" are open tasks
+      conditions.push({
+        status: params.status === 'open' ? { $in: ['open', 'overdue'] } : params.status,
+      });
     }
 
     if (params.priority && params.priority !== 'all') {
