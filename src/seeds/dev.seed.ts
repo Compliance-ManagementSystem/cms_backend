@@ -1,13 +1,4 @@
-/**
- * Development Seed Script
- *
- * Creates minimal reference data to verify model creation, relationships,
- * and indexes across all 19 collections. ONLY for development use.
- *
- * Run with: npm run seed:dev
- *
- * WARNING: Clears all existing data before seeding!
- */
+
 
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
@@ -45,6 +36,27 @@ const log = (msg: string) => console.log(`  ✓ ${msg}`);
 const section = (title: string) =>
   console.log(`\n${'─'.repeat(50)}\n  ${title}\n${'─'.repeat(50)}`);
 
+/**
+ * Inserts only the items that are not in the collection yet (matched by `key`)
+ * and returns every seeded item, whether it was just created or already there.
+ */
+async function insertMissing<T extends Record<string, any>>(
+  model: mongoose.Model<any>,
+  items: T[],
+  key: (item: Record<string, any>) => string
+): Promise<any[]> {
+  const present = new Set((await model.find({})).map((doc) => key(doc)));
+  const missing = items.filter((item) => !present.has(key(item)));
+  if (missing.length > 0) await model.insertMany(missing);
+  const wanted = new Set(items.map(key));
+  const all = (await model.find({})).filter((doc) => wanted.has(key(doc)));
+  // Keep the order the items were listed in
+  return items.map((item) => all.find((doc) => key(doc) === key(item)));
+}
+
+const byCodeKey = (item: Record<string, any>) => String(item.code).toLowerCase();
+const masterDataKey = (item: Record<string, any>) => `${item.category}|${String(item.code).toUpperCase()}`;
+
 // ── Seed ──────────────────────────────────────────────────────────────────────
 
 async function seed() {
@@ -53,35 +65,42 @@ async function seed() {
   await mongoose.connect(MONGODB_URI);
   console.log(`✅ Connected to: ${MONGODB_URI}\n`);
 
-  // ── 1. Clear all 19 collections ───────────────────────────────────────────
-  section('1. Clearing all collections');
-  await Promise.all([
-    Permission.deleteMany({}),
-    Role.deleteMany({}),
-    User.deleteMany({}),
-    MasterData.deleteMany({}),
-    EntityType.deleteMany({}),
-    LocationType.deleteMany({}),
-    Entity.deleteMany({}),
-    Location.deleteMany({}),
-    ComplianceRule.deleteMany({}),
-    ComplianceRecord.deleteMany({}),
-    Licence.deleteMany({}),
-    CmsDocument.deleteMany({}),
-    DocumentVersion.deleteMany({}),
-    Workflow.deleteMany({}),
-    Approval.deleteMany({}),
-    Task.deleteMany({}),
-    Notification.deleteMany({}),
-    AuditLog.deleteMany({}),
-    Settings.deleteMany({}),
-  ]);
-  log('All 19 collections cleared');
+  // ── 1. Never touch a database that already has data ──────────────────────
+  // The seed only fills a database that has no business data. Nothing is ever deleted.
+  // Leftover reference data (permissions, types, master data) is fine: missing items are added.
+  section('1. Checking for existing data');
+  const dataModels: Array<[string, mongoose.Model<any>]> = [
+    ['roles', Role],
+    ['users', User],
+    ['entities', Entity],
+    ['locations', Location],
+    ['compliance rules', ComplianceRule],
+    ['compliance records', ComplianceRecord],
+    ['licences', Licence],
+    ['documents', CmsDocument],
+    ['document versions', DocumentVersion],
+    ['workflows', Workflow],
+    ['approvals', Approval],
+    ['tasks', Task],
+    ['notifications', Notification],
+    ['settings', Settings],
+  ];
+  const existing = (
+    await Promise.all(dataModels.map(async ([name, model]) => [name, await model.countDocuments()] as const))
+  ).filter(([, count]) => count > 0);
+  if (existing.length > 0) {
+    console.log('\n  This database already has data, so nothing was changed:');
+    existing.forEach(([name, count]) => console.log(`    ${name}: ${count}`));
+    console.log('\n  The seed only runs when these collections are empty.\n');
+    await mongoose.disconnect();
+    return;
+  }
+  log('No existing business data, seeding sample data');
 
   // ── 2. Permissions Catalog ────────────────────────────────────────────────
   section('2. Permissions Catalog');
 
-  const permissions = await Permission.insertMany([
+  const permissions = await insertMissing(Permission, [
     // Core Entity & Location
     { name: 'Read Entity', code: 'entity:read', module: 'entity', action: 'read' },
     { name: 'Create Entity', code: 'entity:create', module: 'entity', action: 'create' },
@@ -122,7 +141,7 @@ async function seed() {
 
     { name: 'Read Settings', code: 'settings:read', module: 'settings', action: 'read' },
     { name: 'Update Settings', code: 'settings:update', module: 'settings', action: 'update' },
-  ]);
+  ], byCodeKey);
   log(`${permissions.length} granular permissions created in catalog`);
 
   // ── 3. Roles ──────────────────────────────────────────────────────────────
@@ -241,25 +260,25 @@ async function seed() {
   // ── 4. Entity Types & Location Types ──────────────────────────────────────
   section('4. Entity Types & Location Types');
 
-  const [entityTypeCCPL, entityTypeCPPL, entityTypeCTPL] = await EntityType.insertMany([
+  const [entityTypeCCPL, entityTypeCPPL, entityTypeCTPL] = await insertMissing(EntityType, [
     { name: 'CCPL Healthcare Pvt Ltd', code: 'CCPL', industry: 'Healthcare', isSystem: true, status: 'active' },
     { name: 'CPPL Pharmaceuticals Pvt Ltd', code: 'CPPL', industry: 'Pharma', isSystem: true, status: 'active' },
     { name: 'CTPL Diagnostics Pvt Ltd', code: 'CTPL', industry: 'Diagnostics', isSystem: true, status: 'active' },
-  ]);
+  ], byCodeKey);
   log(`3 entity types created: CCPL, CPPL, CTPL`);
 
-  const [locTypeUnit, locTypeClinic, locTypeOffice] = await LocationType.insertMany([
+  const [locTypeUnit, locTypeClinic, locTypeOffice] = await insertMissing(LocationType, [
     { name: 'Operating Unit', code: 'UNIT', isSystem: true, status: 'active' },
     { name: 'Healthcare Clinic', code: 'CLINIC', isSystem: true, status: 'active' },
     { name: 'Corporate Office', code: 'OFFICE', isSystem: true, status: 'active' },
-  ]);
+  ], byCodeKey);
   log(`3 location types created: UNIT, CLINIC, OFFICE`);
 
   // ── 5. Master Data (All 12 Categories) ────────────────────────────────────
   section('5. Master Data (All 12 Categories)');
 
   // 5a. Non-hierarchical categories + States
-  const baseMasterData = await MasterData.insertMany([
+  const baseMasterData = await insertMissing(MasterData, [
     // 1. Entity types
     { category: 'entity_type', code: 'CCPL', label: 'CCPL Healthcare', description: 'Primary hospital & clinic cluster', sortOrder: 1, isSystem: true },
     { category: 'entity_type', code: 'CPPL', label: 'CPPL Pharmaceuticals', description: 'Pharmaceutical formulation and distribution', sortOrder: 2, isSystem: true },
@@ -345,7 +364,7 @@ async function seed() {
     { category: 'state', code: 'DL', label: 'National Capital Territory of Delhi', description: 'Northern Region - Capital: New Delhi', sortOrder: 3, isSystem: true },
     { category: 'state', code: 'GJ', label: 'Gujarat', description: 'Western Region - Capital: Gandhinagar', sortOrder: 4, isSystem: true },
     { category: 'state', code: 'TN', label: 'Tamil Nadu', description: 'Southern Region - Capital: Chennai', sortOrder: 5, isSystem: true },
-  ]);
+  ], masterDataKey);
 
   const stateMH = baseMasterData.find(d => d.category === 'state' && d.code === 'MH')!;
   const stateKA = baseMasterData.find(d => d.category === 'state' && d.code === 'KA')!;
@@ -354,7 +373,7 @@ async function seed() {
   const stateTN = baseMasterData.find(d => d.category === 'state' && d.code === 'TN')!;
 
   // 11. Districts (with parent state references)
-  const districtMasterData = await MasterData.insertMany([
+  const districtMasterData = await insertMissing(MasterData, [
     { category: 'district', code: 'MUMBAI_CITY', label: 'Mumbai City', parent: stateMH._id, sortOrder: 1, isSystem: true },
     { category: 'district', code: 'PUNE', label: 'Pune', parent: stateMH._id, sortOrder: 2, isSystem: true },
     { category: 'district', code: 'THANE', label: 'Thane', parent: stateMH._id, sortOrder: 3, isSystem: false },
@@ -366,7 +385,7 @@ async function seed() {
     { category: 'district', code: 'SURAT', label: 'Surat', parent: stateGJ._id, sortOrder: 2, isSystem: false },
     { category: 'district', code: 'CHENNAI', label: 'Chennai', parent: stateTN._id, sortOrder: 1, isSystem: true },
     { category: 'district', code: 'COIMBATORE', label: 'Coimbatore', parent: stateTN._id, sortOrder: 2, isSystem: false },
-  ]);
+  ], masterDataKey);
 
   const masterDataItems = [...baseMasterData, ...districtMasterData];
 
@@ -385,7 +404,7 @@ async function seed() {
   const fireCategory = byCode('compliance_category', 'FIRE_SAFETY');
   const foodCategory = byCode('compliance_category', 'FOOD_SAFETY');
 
-  log(`15 MasterData items seeded`);
+  log(`${masterDataItems.length} MasterData items in place`);
 
   // ── 6. Users (All 6 Roles with bcrypt password: Password123!) ──────────────
   section('6. Users (All 6 Roles — Default Password: Password123!)');
@@ -572,6 +591,12 @@ async function seed() {
       id: location1._id,
     },
     currentVersion: 1,
+    fileUrl: 'https://storage.cms.local/docs/fssai-cert-v1.pdf',
+    fileName: 'fssai-cert-mumbai-2025.pdf',
+    fileSize: 1048576,
+    mimeType: 'application/pdf',
+    uploadedBy: complianceManager._id,
+    uploadedAt: new Date('2025-04-02'),
     latestVersionUrl: 'https://storage.cms.local/docs/fssai-cert-v1.pdf',
     issueDate: new Date('2025-04-01'),
     expiryDate: new Date('2026-03-31'),
@@ -619,13 +644,12 @@ async function seed() {
     category: foodCategory._id,
     description: 'Mandatory annual renewal of Food Safety licence',
     legalReference: 'Food Safety and Standards Act, 2006 — Section 31',
-    applicability: {
-      entityTypes: [ccplType._id, cpplType._id],
-      locationTypes: [unitType._id, clinicType._id],
-      states: [],
-      industries: [],
-    },
-    renewalFrequency: 'yearly',
+    applicableEntityTypes: [ccplType._id, cpplType._id],
+    applicableLocationTypes: [unitType._id, clinicType._id],
+    applicableStates: [],
+    frequency: byCode('compliance_frequency', 'ANNUALLY')._id,
+    renewalFrequency: 'ANNUALLY',
+    renewalCycle: 365,
     reminderDaysBefore: [90, 60, 30, 7],
     requiredDocuments: [
       { documentType: licenceDocType._id, label: 'FSSAI Licence Certificate', isMandatory: true },
@@ -645,13 +669,12 @@ async function seed() {
     category: fireCategory._id,
     description: 'Annual renewal of Fire No Objection Certificate',
     legalReference: 'Fire Prevention and Life Safety Measures Act',
-    applicability: {
-      entityTypes: [],
-      locationTypes: [unitType._id, clinicType._id, officeType._id],
-      states: [],
-      industries: [],
-    },
-    renewalFrequency: 'yearly',
+    applicableEntityTypes: [],
+    applicableLocationTypes: [unitType._id, clinicType._id, officeType._id],
+    applicableStates: [],
+    frequency: byCode('compliance_frequency', 'ANNUALLY')._id,
+    renewalFrequency: 'ANNUALLY',
+    renewalCycle: 365,
     reminderDaysBefore: [60, 30, 7],
     requiredDocuments: [
       { documentType: certDocType._id, label: 'Fire NOC Certificate', isMandatory: true },
@@ -670,6 +693,7 @@ async function seed() {
   const record1 = await ComplianceRecord.create({
     entity: entity._id,
     location: location1._id,
+    rule: fssaiRule._id,
     complianceRule: fssaiRule._id,
     recordNumber: 'CR-2026-00001',
     issueDate: new Date('2025-04-01'),
@@ -696,6 +720,7 @@ async function seed() {
   const record2 = await ComplianceRecord.create({
     entity: entity._id,
     location: location1._id,
+    rule: fireNocRule._id,
     complianceRule: fireNocRule._id,
     recordNumber: 'CR-2026-00002',
     expiryDate: new Date('2026-06-30'),
@@ -709,6 +734,7 @@ async function seed() {
   const record3 = await ComplianceRecord.create({
     entity: entity._id,
     location: location2._id,
+    rule: fssaiRule._id,
     complianceRule: fssaiRule._id,
     recordNumber: 'CR-2026-00003',
     expiryDate: new Date('2025-12-31'),
@@ -774,35 +800,31 @@ async function seed() {
   // ── 14. Approvals ─────────────────────────────────────────────────────────
   section('14. Approvals');
 
+  // The workflow history behind record 1: submitted by the officer, approved by the entity admin
   const approval1 = await Approval.create({
     entity: entity._id,
     location: location1._id,
     complianceRecord: record1._id,
-    level: 1,
-    approver: complianceManager._id,
-    decision: 'approved',
-    comments: 'All compliance certificates verified against MCA & state records.',
-    requestedBy: entityAdmin._id,
-    requestedAt: new Date('2025-04-02'),
-    decidedAt: new Date('2025-04-05'),
-    slaHours: 48,
+    action: 'Submit',
+    performedBy: complianceManager._id,
+    performedAt: new Date('2025-04-02'),
+    previousStatus: 'pending',
+    newStatus: 'submitted',
   });
-  log(`Approval 1: Level ${approval1.level} → ${approval1.decision}`);
+  log(`Approval 1: ${approval1.action} → ${approval1.newStatus}`);
 
   const approval2 = await Approval.create({
     entity: entity._id,
     location: location1._id,
-    complianceRecord: record2._id,
-    level: 1,
-    approver: entityAdmin._id,
-    decision: 'pending',
-    comments: 'Awaiting site audit inspection report before sign-off.',
-    requestedBy: complianceManager._id,
-    requestedAt: new Date('2026-03-01'),
-    slaHours: 72,
-    dueDate: new Date('2026-03-04'),
+    complianceRecord: record1._id,
+    action: 'Approve',
+    performedBy: entityAdmin._id,
+    performedAt: new Date('2025-04-05'),
+    comments: 'All compliance certificates verified against MCA & state records.',
+    previousStatus: 'submitted',
+    newStatus: 'approved',
   });
-  log(`Approval 2: Level ${approval2.level} → ${approval2.decision}`);
+  log(`Approval 2: ${approval2.action} → ${approval2.newStatus}`);
 
   // ── 15. Tasks ─────────────────────────────────────────────────────────────
   section('15. Tasks');
@@ -880,10 +902,11 @@ async function seed() {
   section('17. Audit Logs');
 
   await AuditLog.create({
-    action: 'create',
-    resource: 'Entity',
-    resourceId: entity._id,
-    entity: entity._id,
+    action: 'ENTITY_CREATED',
+    module: 'entities',
+    entityType: 'Entity',
+    recordId: entity._id,
+    entityId: entity._id,
     actor: superAdmin._id,
     actorEmail: superAdmin.email,
     actorRole: superAdminRole.name,
@@ -894,10 +917,11 @@ async function seed() {
   });
 
   await AuditLog.create({
-    action: 'create',
-    resource: 'Location',
-    resourceId: location1._id,
-    entity: entity._id,
+    action: 'LOCATION_CREATED',
+    module: 'locations',
+    entityType: 'Location',
+    recordId: location1._id,
+    entityId: entity._id,
     actor: entityAdmin._id,
     actorEmail: entityAdmin.email,
     actorRole: adminRole.name,
@@ -908,10 +932,11 @@ async function seed() {
   });
 
   await AuditLog.create({
-    action: 'approve',
-    resource: 'ComplianceRecord',
-    resourceId: record1._id,
-    entity: entity._id,
+    action: 'STATUS_CHANGED',
+    module: 'compliance',
+    entityType: 'ComplianceRecord',
+    recordId: record1._id,
+    entityId: entity._id,
     actor: complianceManager._id,
     actorEmail: complianceManager.email,
     actorRole: managerRole.name,

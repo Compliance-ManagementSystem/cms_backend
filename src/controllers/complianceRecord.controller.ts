@@ -518,9 +518,10 @@ export const getComplianceRecordApprovals = asyncHandler(async (req: Request, re
 
   assertInScope(req, record);
 
-  const [approvals, documentRequirements] = await Promise.all([
+  const [approvals, documentRequirements, approvalProgress] = await Promise.all([
     ApprovalWorkflowService.getRecordApprovals(id, 'desc'),
     ApprovalWorkflowService.getDocumentRequirements(record),
+    ApprovalWorkflowService.getApprovalProgress(record, req.auth!.userId),
   ]);
 
   const availableActions = ApprovalWorkflowService.getAvailableActions(
@@ -531,13 +532,15 @@ export const getComplianceRecordApprovals = asyncHandler(async (req: Request, re
       role: req.auth!.role,
       entityId: req.auth!.entityId,
     },
-    documentRequirements
+    documentRequirements,
+    approvalProgress
   );
 
   return ApiResponse.success(res, {
     currentStatus: record.status,
     approvals,
     availableActions,
+    approvalProgress,
     documentRequirements,
   });
 });

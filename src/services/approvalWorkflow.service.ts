@@ -60,6 +60,15 @@ export interface AvailableActionInfo {
   disabledReason?: string; // set when required documents block this action
 }
 
+export interface ApprovalProgress {
+  /** Approvals the rule asks for before the record is approved */
+  required: number;
+  /** Approvals given since the latest submission */
+  given: number;
+  /** Whether the current user gave one of them */
+  approvedByUser: boolean;
+}
+
 export interface DocumentRequirementStatus {
   documentTypeId: string | null;
   documentTypeCode?: string;
@@ -256,6 +265,37 @@ export class ApprovalWorkflowService {
   }
 
   /**
+   * How far a record is through the approvals its rule asks for.
+   * Approvals count from the latest submission, so a resubmitted record starts again.
+   */
+  public static async getApprovalProgress(
+    record: IComplianceRecord,
+    userId?: string
+  ): Promise<ApprovalProgress> {
+    const rule = await ComplianceRule.findById(record.rule || record.complianceRule).select('approvalLevels');
+    const required = Math.max(1, rule?.approvalLevels || 1);
+
+    const lastSubmission = await Approval.findOne({
+      complianceRecord: record._id,
+      action: { $in: ['Submit', 'Resubmit'] },
+    })
+      .sort({ performedAt: -1 })
+      .select('performedAt');
+
+    const approvals = await Approval.find({
+      complianceRecord: record._id,
+      action: 'Approve',
+      ...(lastSubmission ? { performedAt: { $gt: lastSubmission.performedAt } } : {}),
+    }).select('performedBy');
+
+    return {
+      required,
+      given: Math.min(approvals.length, required),
+      approvedByUser: !!userId && approvals.some((approval) => String(approval.performedBy) === String(userId)),
+    };
+  }
+
+  /**
    * Validates state transition and returns the resulting target status.
    * Throws 400 Bad Request for any invalid or disallowed transition.
    */
@@ -385,7 +425,23 @@ export class ApprovalWorkflowService {
     const previousStatus = record.status;
 
     // 2. Validate transition
-    const newStatus = this.validateTransition(previousStatus, action, comments);
+    let newStatus = this.validateTransition(previousStatus, action, comments);
+
+    // 2a. Rules can ask for several approvals, each from a different person.
+    // Until the last one is given the record stays under review.
+    let approvalNote = '';
+    if (action === 'Approve') {
+      const progress = await this.getApprovalProgress(record, user.userId);
+      if (progress.required > 1) {
+        if (progress.approvedByUser) {
+          throw ApiError.badRequest(
+            `You have already approved this record. Approval ${progress.given + 1} of ${progress.required} must come from a different approver.`
+          );
+        }
+        approvalNote = ` (approval ${progress.given + 1} of ${progress.required})`;
+        if (progress.given + 1 < progress.required) newStatus = 'under_review';
+      }
+    }
 
     // 2b. Required documents must be in place for submission and approval
     const documentBlocker = this.getDocumentBlocker(
@@ -442,7 +498,7 @@ export class ApprovalWorkflowService {
       level: (record.currentApprovalLevel || 0) + 1,
       approver: new Types.ObjectId(user.userId),
       decision:
-        newStatus === 'approved'
+        action === 'Approve'
           ? 'approved'
           : newStatus === 'rejected'
           ? 'rejected'
@@ -470,7 +526,7 @@ export class ApprovalWorkflowService {
       entityId: record.entity as Types.ObjectId,
       previousValue: { status: previousStatus },
       newValue: { status: newStatus },
-      description: `Workflow Action: "${action}" — transitioned "${record.recordNumber}" from ${previousStatus} to ${newStatus}`,
+      description: `Workflow Action: "${action}"${approvalNote} — transitioned "${record.recordNumber}" from ${previousStatus} to ${newStatus}`,
       metadata: {
         approvalId: approval._id,
         action,
@@ -502,7 +558,8 @@ export class ApprovalWorkflowService {
   public static getAvailableActions(
     record: IComplianceRecord,
     user: WorkflowUserContext,
-    requirements: DocumentRequirementStatus[] = []
+    requirements: DocumentRequirementStatus[] = [],
+    approvalProgress?: ApprovalProgress
   ): AvailableActionInfo[] {
     const { role, entityId } = user;
     const actions: AvailableActionInfo[] = [];
@@ -643,6 +700,23 @@ export class ApprovalWorkflowService {
     for (const info of actions) {
       const blocker = this.getDocumentBlocker(info.action, requirements);
       if (blocker) info.disabledReason = blocker;
+    }
+
+    // Multi-level approval: say which approval this is, and stop the same person approving twice
+    if (approvalProgress && approvalProgress.required > 1) {
+      for (const info of actions) {
+        if (info.action !== 'Approve') continue;
+        const next = approvalProgress.given + 1;
+        const isFinal = next >= approvalProgress.required;
+        info.label = `Approve (${next} of ${approvalProgress.required})`;
+        info.targetStatus = isFinal ? 'approved' : 'under_review';
+        info.description = isFinal
+          ? 'Give the final approval and sign off this compliance.'
+          : `Give approval ${next} of ${approvalProgress.required}. The record stays under review until the last approval.`;
+        if (approvalProgress.approvedByUser && !info.disabledReason) {
+          info.disabledReason = 'You have already approved this record. The next approval must come from a different approver.';
+        }
+      }
     }
 
     return actions;

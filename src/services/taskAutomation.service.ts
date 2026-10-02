@@ -64,6 +64,8 @@ const AWAITING_UNIT = ['pending', 'correction', 'rejected'];
 const IN_REVIEW = ['submitted', 'resubmitted', 'under_review'];
 const GRANTED = ['approved', 'expiring_soon'];
 
+const PRIORITY_RANK: Record<TaskPriority, number> = { low: 0, medium: 1, high: 2, critical: 3 };
+
 type AutoGenSource =
   | 'expiry_monitor'
   | 'expired_checker'
@@ -529,8 +531,8 @@ export class TaskAutomationService {
     return ComplianceRecord.find(filter)
       .populate('entity', 'name code owner')
       .populate('location', 'name code manager')
-      .populate('rule', 'name code requiredDocuments renewalCycle')
-      .populate('complianceRule', 'name code requiredDocuments renewalCycle')
+      .populate('rule', 'name code requiredDocuments renewalCycle priority notificationRules reminderDaysBefore')
+      .populate('complianceRule', 'name code requiredDocuments renewalCycle priority notificationRules reminderDaysBefore')
       .populate('assignedUser', 'firstName lastName email');
   }
 
@@ -643,10 +645,24 @@ export class TaskAutomationService {
     const status = record.status;
 
     // ── Which conditions hold right now ───────────────────────────────────────
+    // A rule's own reminder schedule wins over the system default
+    const ruleReminderDays: number[] = rule?.notificationRules?.reminderDays?.length
+      ? rule.notificationRules.reminderDays
+      : rule?.reminderDaysBefore || [];
+    const reminderDays = ruleReminderDays.length
+      ? [...ruleReminderDays].sort((a, b) => a - b)
+      : ctx.reminderDays;
+
     const milestone =
       GRANTED.includes(status) && daysToExpiry !== null && daysToExpiry > 0
-        ? ctx.reminderDays.find((m) => daysToExpiry <= m)
+        ? reminderDays.find((m) => daysToExpiry <= m)
         : undefined;
+
+    // Tasks are never less urgent than the rule they come from
+    const atLeastRulePriority = (priority: TaskPriority): TaskPriority => {
+      const rulePriority = rule?.priority as TaskPriority | undefined;
+      return rulePriority && PRIORITY_RANK[rulePriority] > PRIORITY_RANK[priority] ? rulePriority : priority;
+    };
 
     const awaitingUnit = AWAITING_UNIT.includes(status);
     const documentBlocker = awaitingUnit
@@ -702,7 +718,7 @@ export class TaskAutomationService {
           title: `Compliance Expiring in ${daysToExpiry}d: ${ruleName}`,
           description: `Statutory compliance record ${recordNumber} for ${unitName} will expire on ${expiry.toLocaleDateString()}. Please prepare and file renewal documents.`,
           assignedTo: responsibleUserId,
-          priority: daysToExpiry <= 7 ? 'critical' : daysToExpiry <= 15 ? 'high' : 'medium',
+          priority: atLeastRulePriority(daysToExpiry <= 7 ? 'critical' : daysToExpiry <= 15 ? 'high' : 'medium'),
           dueDate: record.expiryDate!,
           status: 'open',
           taskType: 'renewal',
@@ -758,7 +774,7 @@ export class TaskAutomationService {
           title: `Approval Required: ${ruleName} (${unitName})`,
           description: `Statutory compliance documentation for record ${recordNumber} is awaiting official reviewer inspection and sign-off.`,
           assignedTo: await this.resolveReviewer(entityId, ctx),
-          priority: 'high',
+          priority: atLeastRulePriority('high'),
           dueDate: record.dueDate && due! >= ctx.today ? record.dueDate : new Date(Date.now() + 7 * DAY_MS),
           status: 'pending_approval',
           taskType: 'approval',
@@ -783,7 +799,7 @@ export class TaskAutomationService {
           title: `Missing Evidence Upload: ${ruleName}`,
           description: `Record ${recordNumber} cannot be submitted for review yet. ${documentBlocker}`,
           assignedTo: responsibleUserId,
-          priority: 'high',
+          priority: atLeastRulePriority('high'),
           dueDate: record.dueDate || new Date(Date.now() + 5 * DAY_MS),
           status: 'open',
           taskType: 'document_upload',

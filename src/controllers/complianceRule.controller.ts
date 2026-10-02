@@ -10,6 +10,7 @@ import mongoose, { Types } from 'mongoose';
 import ComplianceRule, { IComplianceRule } from '../models/ComplianceRule.js';
 import MasterData from '../models/MasterData.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
+import AuditLog from '../models/AuditLog.js';
 import Entity from '../models/Entity.js';
 import Location from '../models/Location.js';
 import { RuleEngineService } from '../services/ruleEngine.service.js';
@@ -120,6 +121,27 @@ const resolveEscalationRules = (input: any) => {
   };
 };
 
+// Days between renewals implied by each frequency, used when a rule does not set its own cycle
+const FREQUENCY_CYCLE_DAYS: Record<string, number> = {
+  DAILY: 1,
+  WEEKLY: 7,
+  MONTHLY: 30,
+  QUARTERLY: 90,
+  HALF_YEARLY: 180,
+  ANNUALLY: 365,
+  BI_ANNUALLY: 730,
+  ONETIME: 0,
+  ONE_TIME: 0,
+};
+
+const resolveApprovalLevels = (input: unknown) => {
+  const levels = Number(input ?? 1);
+  if (!Number.isInteger(levels) || levels < 1 || levels > 5) {
+    throw ApiError.badRequest('Approval levels must be a whole number from 1 to 5.');
+  }
+  return levels;
+};
+
 /** Renewal cycle in days; 0 means a one-time obligation */
 const resolveRenewalCycle = (input: unknown) => {
   const cycle = Number(input);
@@ -190,14 +212,36 @@ const logRuleAudit = (
     ...values,
   });
 
-const populateRule = (id: Types.ObjectId) =>
-  ComplianceRule.findById(id)
+/**
+ * Rules saved before the criteria moved to top-level fields keep them under `applicability`.
+ * Present both shapes the same way, so such a rule displays, edits and evaluates correctly.
+ */
+const withLegacyCriteria = <T extends Record<string, any>>(rule: T): T => {
+  const legacy = rule.applicability || {};
+  const pick = (current: unknown[] | undefined, fallback: unknown[] | undefined) =>
+    current?.length ? current : fallback || [];
+  return {
+    ...rule,
+    applicableEntityTypes: pick(rule.applicableEntityTypes, legacy.entityTypes),
+    applicableLocationTypes: pick(rule.applicableLocationTypes, legacy.locationTypes),
+    applicableStates: pick(rule.applicableStates, legacy.states),
+    mandatory: rule.mandatory ?? true,
+    approvalLevels: rule.approvalLevels ?? 1,
+  };
+};
+
+const populateRule = async (id: Types.ObjectId) => {
+  const rule = await ComplianceRule.findById(id)
     .populate('category', 'code label')
     .populate('frequency', 'code label')
     .populate('applicableEntityTypes', 'code label')
     .populate('applicableLocationTypes', 'code label')
+    .populate('applicability.entityTypes', 'code label')
+    .populate('applicability.locationTypes', 'code label')
     .populate('requiredDocuments.documentType', 'code label')
     .lean();
+  return rule ? withLegacyCriteria(rule) : rule;
+};
 
 const findRuleOrFail = async (id: string) => {
   if (!mongoose.Types.ObjectId.isValid(id)) throw ApiError.badRequest('Invalid Compliance Rule ID format');
@@ -258,6 +302,8 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
       .populate('frequency', 'code label')
       .populate('applicableEntityTypes', 'code label')
       .populate('applicableLocationTypes', 'code label')
+      .populate('applicability.entityTypes', 'code label')
+      .populate('applicability.locationTypes', 'code label')
       .populate('requiredDocuments.documentType', 'code label')
       .sort({ [sortBy]: sortOrder === 'asc' ? 1 : -1 })
       .skip((page - 1) * limit)
@@ -280,7 +326,10 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
   const recordCountByRule = new Map(recordCounts.map((group) => [String(group._id), group.count]));
 
   return ApiResponse.success(res, {
-    rules: rules.map((rule) => ({ ...rule, recordCount: recordCountByRule.get(String(rule._id)) || 0 })),
+    rules: rules.map((rule) => ({
+      ...withLegacyCriteria(rule),
+      recordCount: recordCountByRule.get(String(rule._id)) || 0,
+    })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     stats: {
       total,
@@ -305,6 +354,8 @@ export const getComplianceRuleById = asyncHandler(async (req: Request, res: Resp
     .populate('frequency', 'code label description')
     .populate('applicableEntityTypes', 'code label description')
     .populate('applicableLocationTypes', 'code label description')
+    .populate('applicability.entityTypes', 'code label description')
+    .populate('applicability.locationTypes', 'code label description')
     .populate('requiredDocuments.documentType', 'code label description')
     .populate('createdBy', 'firstName lastName email')
     .populate('updatedBy', 'firstName lastName email')
@@ -314,7 +365,7 @@ export const getComplianceRuleById = asyncHandler(async (req: Request, res: Resp
     throw ApiError.notFound(`Compliance Rule with ID "${id}" not found`);
   }
 
-  return ApiResponse.success(res, { rule });
+  return ApiResponse.success(res, { rule: withLegacyCriteria(rule) });
 });
 
 // ── 3. Create Compliance Rule ─────────────────────────────────────────────────
@@ -340,15 +391,18 @@ export const createComplianceRule = asyncHandler(async (req: Request, res: Respo
     applicableStates: await resolveStates(body.applicableStates || []),
     frequency: frequency._id,
     renewalFrequency: frequency.code,
-    renewalCycle: resolveRenewalCycle(body.renewalCycle ?? 365),
+    renewalCycle: resolveRenewalCycle(body.renewalCycle ?? FREQUENCY_CYCLE_DAYS[frequency.code] ?? 365),
     requiredDocuments: await resolveRequiredDocuments(body.requiredDocuments || []),
     mandatory: body.mandatory !== undefined ? Boolean(body.mandatory) : true,
     status,
     notificationRules: resolveNotificationRules(body.notificationRules),
+    // An empty schedule means "use the system default"; the copy must agree or it is restored on save
+    reminderDaysBefore: resolveNotificationRules(body.notificationRules).reminderDays,
     escalationRules: resolveEscalationRules(body.escalationRules),
     priority: body.priority || 'medium',
-    requiresApproval: Boolean(body.requiresApproval),
-    approvalLevels: Number(body.approvalLevels) || 1,
+    // Every record needs one approval; the flag only marks rules that ask for more
+    approvalLevels: resolveApprovalLevels(body.approvalLevels),
+    requiresApproval: resolveApprovalLevels(body.approvalLevels) > 1,
     createdBy: actorId(req),
     updatedBy: actorId(req),
   });
@@ -411,10 +465,14 @@ export const updateComplianceRule = asyncHandler(async (req: Request, res: Respo
   if (body.requiredDocuments !== undefined) {
     rule.requiredDocuments = await resolveRequiredDocuments(body.requiredDocuments);
   }
-  if (body.notificationRules !== undefined) rule.notificationRules = resolveNotificationRules(body.notificationRules);
+  if (body.notificationRules !== undefined) {
+    rule.notificationRules = resolveNotificationRules(body.notificationRules);
+    // An empty schedule means "use the system default"; the copy must agree or it is restored on save
+    rule.reminderDaysBefore = rule.notificationRules.reminderDays;
+  }
   if (body.escalationRules !== undefined) rule.escalationRules = resolveEscalationRules(body.escalationRules);
-  if (body.requiresApproval !== undefined) rule.requiresApproval = Boolean(body.requiresApproval);
-  if (body.approvalLevels !== undefined) rule.approvalLevels = Number(body.approvalLevels) || 1;
+  if (body.approvalLevels !== undefined) rule.approvalLevels = resolveApprovalLevels(body.approvalLevels);
+  rule.requiresApproval = rule.approvalLevels > 1;
 
   rule.updatedBy = actorId(req);
   await rule.save();
@@ -572,8 +630,15 @@ const findApplicableLocations = async (req: Request, criteria: RuleCriteria) => 
 
   const candidates = locations.filter((location: any) => location.entity && location.entity.status === 'active');
   const applicable = candidates.filter((location: any) => {
+    // Named fields, not a spread: a Mongoose document does not spread into its values
     const { matches } = RuleEngineService.isRuleApplicable(
-      { ...criteria, status: 'active', active: true },
+      {
+        applicableEntityTypes: criteria.applicableEntityTypes,
+        applicableLocationTypes: criteria.applicableLocationTypes,
+        applicableStates: criteria.applicableStates,
+        status: 'active',
+        active: true,
+      },
       { entity: location.entity, location }
     );
     return matches.entityTypeMatch && matches.locationTypeMatch && matches.stateMatch;
@@ -584,7 +649,7 @@ const findApplicableLocations = async (req: Request, criteria: RuleCriteria) => 
 
 export const getRuleCoverage = asyncHandler(async (req: Request, res: Response) => {
   const rule = await findRuleOrFail(String(req.params.id));
-  const { applicable, totalLocations } = await findApplicableLocations(req, rule);
+  const { applicable, totalLocations } = await findApplicableLocations(req, withLegacyCriteria(rule.toObject()));
 
   const records = await ComplianceRecord.find({
     rule: rule._id,
@@ -640,7 +705,7 @@ export const generateRuleRecords = asyncHandler(async (req: Request, res: Respon
     throw ApiError.badRequest(`Rule "${rule.name}" is ${rule.status}. Activate it before creating records.`);
   }
 
-  const { applicable } = await findApplicableLocations(req, rule);
+  const { applicable } = await findApplicableLocations(req, withLegacyCriteria(rule.toObject()));
   const existing = await ComplianceRecord.distinct('location', {
     rule: rule._id,
     location: { $in: applicable.map((location) => location._id) },
@@ -677,4 +742,20 @@ export const generateRuleRecords = asyncHandler(async (req: Request, res: Respon
       ? `Created ${created.length} compliance record(s) for "${rule.name}"`
       : 'Every applicable location already has a record for this rule'
   );
+});
+
+// ── 10. Change history of a rule ──────────────────────────────────────────────
+export const getRuleHistory = asyncHandler(async (req: Request, res: Response) => {
+  const rule = await findRuleOrFail(String(req.params.id));
+
+  // recordId is stored as a string by some writers and as an ObjectId by others
+  const auditLogs = await AuditLog.find({
+    entityType: 'ComplianceRule',
+    recordId: { $in: [String(rule._id), rule._id] },
+  })
+    .sort({ timestamp: -1 })
+    .limit(30)
+    .lean();
+
+  return ApiResponse.success(res, { auditLogs });
 });

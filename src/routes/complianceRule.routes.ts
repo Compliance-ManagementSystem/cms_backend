@@ -20,6 +20,7 @@ import {
   getRuleCoverage,
   previewRuleCoverage,
   generateRuleRecords,
+  getRuleHistory,
 } from '../controllers/complianceRule.controller.js';
 import {
   createComplianceRuleSchema,
@@ -66,6 +67,12 @@ router.get(
   '/:id/coverage',
   requirePermission('compliance_rule:read'),
   getRuleCoverage
+);
+
+router.get(
+  '/:id/history',
+  requirePermission('compliance_rule:read'),
+  getRuleHistory
 );
 
 router.post(
