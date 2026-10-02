@@ -55,6 +55,8 @@ export const createEntitySchema = z.object({
     contactEmail: z.string().trim().toLowerCase().email('Invalid contact email'),
     contactPhone: z.string().trim().min(6, 'Valid phone number is required'),
     contactPerson: z.string().trim().optional(),
+    industry: z.string().trim().optional().nullable().or(z.literal('')),
+    parentEntity: z.string().trim().optional().nullable().or(z.literal('')),
     description: z.string().trim().optional(),
     status: z.enum(['active', 'inactive', 'archived']).optional().default('active'),
   }).refine((data) => data.code || data.entityCode, {
@@ -104,6 +106,8 @@ export const updateEntitySchema = z.object({
     contactEmail: z.string().trim().toLowerCase().email().optional(),
     contactPhone: z.string().trim().optional(),
     contactPerson: z.string().trim().optional(),
+    industry: z.string().trim().optional().nullable().or(z.literal('')),
+    parentEntity: z.string().trim().optional().nullable().or(z.literal('')),
     description: z.string().trim().optional(),
     status: z.enum(['active', 'inactive', 'archived']).optional(),
   }),

@@ -91,17 +91,23 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
   const skip = (page - 1) * limit;
   const sortObj: Record<string, 1 | -1> = { [sortBy]: sortOrder };
 
-  const [entities, total] = await Promise.all([
+  const [entities, total, activeCount, allMatchingEntities] = await Promise.all([
     Entity.find(query)
       .populate('entityType', 'code label')
       .populate('owner', 'firstName lastName email fullName')
       .populate('industry', 'code label')
+      .populate('parentEntity', 'name code')
       .sort(sortObj)
       .skip(skip)
       .limit(limit)
       .lean(),
     Entity.countDocuments(query),
+    Entity.countDocuments({ ...query, status: 'active' }),
+    Entity.find(query).select('_id').lean(),
   ]);
+
+  const allMatchingIds = allMatchingEntities.map((e) => e._id);
+  const totalLocations = await Location.countDocuments({ entity: { $in: allMatchingIds } });
 
   // Attach location count and compliance count for each entity
   const entityIds = entities.map((e) => e._id);
@@ -137,6 +143,8 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
     entities: enrichedEntities,
     pagination: {
       total,
+      activeCount,
+      totalLocations,
       page,
       limit,
       totalPages: Math.ceil(total / limit),
@@ -263,16 +271,20 @@ export const createEntity = asyncHandler(async (req: Request, res: Response) => 
     contactEmail,
     contactPhone,
     contactPerson,
+    industry,
+    parentEntity,
     description,
     status,
   } = req.body;
 
   const resolvedCode = (code || entityCode || '').toUpperCase().trim();
 
-  // Check code uniqueness
-  const existing = await Entity.findOne({ code: resolvedCode });
-  if (existing) {
-    throw ApiError.conflict(`An entity with code '${resolvedCode}' already exists.`);
+  // Check code uniqueness only if a code was provided
+  if (resolvedCode) {
+    const existing = await Entity.findOne({ code: resolvedCode });
+    if (existing) {
+      throw ApiError.conflict(`An entity with code '${resolvedCode}' already exists.`);
+    }
   }
 
   // Validate entityType exists in MasterData
@@ -302,6 +314,8 @@ export const createEntity = asyncHandler(async (req: Request, res: Response) => 
     contactEmail: contactEmail.toLowerCase().trim(),
     contactPhone: contactPhone.trim(),
     contactPerson: contactPerson?.trim() || undefined,
+    industry: industry || null,
+    parentEntity: parentEntity || null,
     description: description?.trim() || '',
     status: status || 'active',
     createdBy: req.user?._id,
@@ -309,7 +323,9 @@ export const createEntity = asyncHandler(async (req: Request, res: Response) => 
 
   const populated = await Entity.findById(entity._id)
     .populate('entityType', 'code label')
-    .populate('owner', 'firstName lastName email');
+    .populate('owner', 'firstName lastName email')
+    .populate('parentEntity', 'name code')
+    .populate('industry', 'code label');
 
   await logAuditEvent({
     req,
@@ -366,6 +382,8 @@ export const updateEntity = asyncHandler(async (req: Request, res: Response) => 
     contactEmail,
     contactPhone,
     contactPerson,
+    industry,
+    parentEntity,
     description,
     status,
   } = req.body;
@@ -397,6 +415,8 @@ export const updateEntity = asyncHandler(async (req: Request, res: Response) => 
   if (contactEmail) entity.contactEmail = contactEmail.toLowerCase().trim();
   if (contactPhone) entity.contactPhone = contactPhone.trim();
   if (contactPerson !== undefined) entity.contactPerson = contactPerson.trim();
+  if (industry !== undefined) entity.industry = industry || undefined;
+  if (parentEntity !== undefined) entity.parentEntity = parentEntity || undefined;
   if (description !== undefined) entity.description = description.trim();
   if (status) entity.status = status;
 
@@ -405,7 +425,9 @@ export const updateEntity = asyncHandler(async (req: Request, res: Response) => 
 
   const populated = await Entity.findById(id)
     .populate('entityType', 'code label')
-    .populate('owner', 'firstName lastName email');
+    .populate('owner', 'firstName lastName email')
+    .populate('parentEntity', 'name code')
+    .populate('industry', 'code label');
 
   await logAuditEvent({
     req,

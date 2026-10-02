@@ -150,7 +150,7 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
 
   const skip = (page - 1) * limit;
 
-  const [locations, total] = await Promise.all([
+  const [locations, total, activeCount, allMatchingLocations] = await Promise.all([
     Location.find(query)
       .populate('entity', 'name code entityCode status')
       .populate('locationType', 'code label description')
@@ -161,7 +161,14 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
       .limit(limit)
       .lean(),
     Location.countDocuments(query),
+    Location.countDocuments({ ...query, status: 'active' }),
+    Location.find(query).select('_id').lean(),
   ]);
+
+  const allMatchingIds = allMatchingLocations.map((l) => l._id);
+  const totalCompliance = await ComplianceRecord.countDocuments({
+    location: { $in: allMatchingIds },
+  });
 
   // Aggregate compliance obligations counts per location
   const locationIds = locations.map((l) => l._id);
@@ -183,6 +190,8 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
     locations: enrichedLocations,
     pagination: {
       total,
+      activeCount,
+      totalCompliance,
       page,
       limit,
       totalPages: Math.ceil(total / limit),
@@ -454,7 +463,7 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
       ? (req.user.entity as any)._id?.toString() || req.user.entity.toString()
       : req.auth?.entityId;
 
-    if (existingLocation.entity.toString() !== userEntityId) {
+    if (existingLocation.entity && existingLocation.entity.toString() !== userEntityId) {
       throw ApiError.forbidden('You are not authorized to update locations outside your assigned entity');
     }
   }
@@ -477,11 +486,12 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
     operatingHours,
     parentLocation,
     status,
+    agreements,
   } = req.body;
 
   // Handle entity change (if requested)
   let targetEntityId = existingLocation.entity;
-  if (entityInput && entityInput !== existingLocation.entity.toString()) {
+  if (entityInput && entityInput !== existingLocation.entity?.toString()) {
     if (!isGlobalAdmin(req)) {
       throw ApiError.forbidden('Only administrators can reassign a location to a different entity');
     }
@@ -562,6 +572,19 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
   if (parentLocation !== undefined) {
     existingLocation.parentLocation =
       parentLocation && mongoose.Types.ObjectId.isValid(parentLocation) ? parentLocation : undefined;
+  }
+
+  // Handle agreements update (replace the entire embedded array)
+  if (Array.isArray(agreements)) {
+    existingLocation.agreements = agreements.map((agr: any) => ({
+      agreementType:   (agr.agreementType || '').trim(),
+      agreementNumber: (agr.agreementNumber || '').trim(),
+      startDate:       new Date(agr.startDate),
+      endDate:         new Date(agr.endDate),
+      renewalDate:     agr.renewalDate ? new Date(agr.renewalDate) : undefined,
+      parties:         Array.isArray(agr.parties) ? agr.parties.map((p: string) => p.trim()).filter(Boolean) : [],
+      notes:           agr.notes ? agr.notes.trim() : undefined,
+    }));
   }
 
   // Update address fields
