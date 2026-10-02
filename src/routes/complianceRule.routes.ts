@@ -17,6 +17,9 @@ import {
   restoreComplianceRule,
   deleteComplianceRule,
   evaluateRuleApplicability,
+  getRuleCoverage,
+  previewRuleCoverage,
+  generateRuleRecords,
 } from '../controllers/complianceRule.controller.js';
 import {
   createComplianceRuleSchema,
@@ -45,10 +48,30 @@ router.post(
   evaluateRuleApplicability
 );
 
+// Coverage of unsaved criteria, used by the rule form
+router.post(
+  '/preview-coverage',
+  requirePermission('compliance_rule:read'),
+  previewRuleCoverage
+);
+
 router.get(
   '/:id',
   requirePermission('compliance_rule:read'),
   getComplianceRuleById
+);
+
+// Locations the rule applies to, and whether each already has a record
+router.get(
+  '/:id/coverage',
+  requirePermission('compliance_rule:read'),
+  getRuleCoverage
+);
+
+router.post(
+  '/:id/generate-records',
+  requirePermission('compliance_record:create'),
+  generateRuleRecords
 );
 
 router.post(

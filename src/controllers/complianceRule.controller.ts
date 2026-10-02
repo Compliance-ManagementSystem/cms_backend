@@ -16,7 +16,7 @@ import { RuleEngineService } from '../services/ruleEngine.service.js';
 import { auditService } from '../services/audit.service.js';
 import { ROLES } from '../constants/permissions.js';
 import { complianceRuleQuerySchema } from '../validations/complianceRule.validation.js';
-import { assertInScope } from '../utils/accessScope.js';
+import { assertInScope, getAccessScope, toLocationScopeFilter } from '../utils/accessScope.js';
 import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
@@ -272,8 +272,15 @@ export const getComplianceRules = asyncHandler(async (req: Request, res: Respons
     ComplianceRule.distinct('category', query),
   ]);
 
+  // How many compliance records each listed rule drives
+  const recordCounts = await ComplianceRecord.aggregate<{ _id: Types.ObjectId; count: number }>([
+    { $match: { rule: { $in: rules.map((rule) => rule._id) } } },
+    { $group: { _id: '$rule', count: { $sum: 1 } } },
+  ]);
+  const recordCountByRule = new Map(recordCounts.map((group) => [String(group._id), group.count]));
+
   return ApiResponse.success(res, {
-    rules,
+    rules: rules.map((rule) => ({ ...rule, recordCount: recordCountByRule.get(String(rule._id)) || 0 })),
     pagination: { total, page, limit, totalPages: Math.ceil(total / limit) },
     stats: {
       total,
@@ -545,4 +552,129 @@ export const restoreComplianceRule = asyncHandler(async (req: Request, res: Resp
 
   const updated = await populateRule(rule._id);
   return ApiResponse.success(res, { rule: updated }, `Compliance rule "${rule.name}" restored as inactive`);
+});
+
+// ── 9. Coverage: which locations a rule applies to ────────────────────────────
+
+type RuleCriteria = Pick<IComplianceRule, 'applicableEntityTypes' | 'applicableLocationTypes' | 'applicableStates'>;
+
+/**
+ * Active locations (within the caller's scope) that match a rule's criteria.
+ * The rule's own status is ignored, so an inactive rule can still be previewed.
+ */
+const findApplicableLocations = async (req: Request, criteria: RuleCriteria) => {
+  const locations = await Location.find({ $and: [toLocationScopeFilter(getAccessScope(req)), { status: 'active' }] })
+    .select('name code entity locationType address status')
+    .populate({ path: 'entity', select: 'name code entityType address status' })
+    .populate('locationType', 'code label')
+    .sort({ name: 1 })
+    .lean();
+
+  const candidates = locations.filter((location: any) => location.entity && location.entity.status === 'active');
+  const applicable = candidates.filter((location: any) => {
+    const { matches } = RuleEngineService.isRuleApplicable(
+      { ...criteria, status: 'active', active: true },
+      { entity: location.entity, location }
+    );
+    return matches.entityTypeMatch && matches.locationTypeMatch && matches.stateMatch;
+  });
+
+  return { applicable, totalLocations: candidates.length };
+};
+
+export const getRuleCoverage = asyncHandler(async (req: Request, res: Response) => {
+  const rule = await findRuleOrFail(String(req.params.id));
+  const { applicable, totalLocations } = await findApplicableLocations(req, rule);
+
+  const records = await ComplianceRecord.find({
+    rule: rule._id,
+    location: { $in: applicable.map((location) => location._id) },
+  })
+    .select('location status recordNumber dueDate expiryDate')
+    .lean();
+  const recordByLocation = new Map(records.map((record) => [String(record.location), record]));
+
+  const locations = applicable.map((location: any) => {
+    const record = recordByLocation.get(String(location._id));
+    return {
+      _id: location._id,
+      name: location.name,
+      code: location.code,
+      entity: { _id: location.entity._id, name: location.entity.name, code: location.entity.code },
+      locationType: location.locationType ? { code: location.locationType.code, label: location.locationType.label } : null,
+      city: location.address?.city,
+      state: location.address?.state,
+      record: record
+        ? { _id: record._id, recordNumber: record.recordNumber, status: record.status, dueDate: record.dueDate, expiryDate: record.expiryDate }
+        : null,
+    };
+  });
+
+  const withRecord = locations.filter((location) => location.record).length;
+  return ApiResponse.success(res, {
+    locations,
+    summary: { totalLocations, applicable: locations.length, withRecord, missing: locations.length - withRecord },
+  });
+});
+
+/** Coverage of criteria that have not been saved yet, for the rule form */
+export const previewRuleCoverage = asyncHandler(async (req: Request, res: Response) => {
+  const criteria = {
+    applicableEntityTypes: await resolveMasterDataIds('entity_type', req.body.applicableEntityTypes || [], 'Entity type'),
+    applicableLocationTypes: await resolveMasterDataIds('location_type', req.body.applicableLocationTypes || [], 'Location type'),
+    applicableStates: await resolveStates(req.body.applicableStates || []),
+  };
+  const { applicable, totalLocations } = await findApplicableLocations(req, criteria);
+
+  return ApiResponse.success(res, {
+    totalLocations,
+    applicable: applicable.length,
+    sample: applicable.slice(0, 6).map((location: any) => ({ _id: location._id, name: location.name, entity: location.entity.name })),
+  });
+});
+
+/** Creates a pending compliance record for every applicable location that does not have one yet */
+export const generateRuleRecords = asyncHandler(async (req: Request, res: Response) => {
+  const rule = await findRuleOrFail(String(req.params.id));
+  if (rule.status !== 'active') {
+    throw ApiError.badRequest(`Rule "${rule.name}" is ${rule.status}. Activate it before creating records.`);
+  }
+
+  const { applicable } = await findApplicableLocations(req, rule);
+  const existing = await ComplianceRecord.distinct('location', {
+    rule: rule._id,
+    location: { $in: applicable.map((location) => location._id) },
+  });
+  const covered = new Set(existing.map(String));
+
+  const created: Array<{ _id: Types.ObjectId; recordNumber?: string; location: string }> = [];
+  for (const location of applicable as any[]) {
+    if (covered.has(String(location._id))) continue;
+
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + (rule.renewalCycle || 30));
+
+    const record = new ComplianceRecord({
+      entity: location.entity._id,
+      location: location._id,
+      rule: rule._id,
+      complianceRule: rule._id,
+      dueDate,
+      status: 'pending',
+      currentVersion: 1,
+      createdBy: actorId(req),
+      updatedBy: actorId(req),
+    });
+    await record.save();
+    await auditService.logComplianceCreated(record, req);
+    created.push({ _id: record._id as Types.ObjectId, recordNumber: record.recordNumber, location: location.name });
+  }
+
+  return ApiResponse.success(
+    res,
+    { created, createdCount: created.length },
+    created.length > 0
+      ? `Created ${created.length} compliance record(s) for "${rule.name}"`
+      : 'Every applicable location already has a record for this rule'
+  );
 });
