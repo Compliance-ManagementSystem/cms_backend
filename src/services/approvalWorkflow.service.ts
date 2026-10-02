@@ -30,8 +30,9 @@ import ComplianceRecord, {
 } from '../models/ComplianceRecord.js';
 import Approval, { IApprovalDoc, WorkflowAction } from '../models/Approval.js';
 import ComplianceRule from '../models/ComplianceRule.js';
+import CmsDocument from '../models/Document.js';
 import User, { IUser } from '../models/User.js';
-import AuditLog from '../models/AuditLog.js';
+import { auditService } from './audit.service.js';
 import { ApiError } from '../utils/apiError.js';
 import { ROLES } from '../constants/permissions.js';
 
@@ -56,6 +57,22 @@ export interface AvailableActionInfo {
   variant: 'primary' | 'secondary' | 'success' | 'danger' | 'warning' | 'info';
   requiresComments: boolean;
   description: string;
+  disabledReason?: string; // set when required documents block this action
+}
+
+export interface DocumentRequirementStatus {
+  documentTypeId: string | null;
+  documentTypeCode?: string;
+  label: string;
+  isMandatory: boolean;
+  // missing: nothing uploaded · pending: uploaded, awaiting verification
+  status: 'missing' | 'pending' | 'verified' | 'rejected';
+  documents: Array<{
+    _id: string;
+    name: string;
+    verificationStatus: string;
+    currentVersion: number;
+  }>;
 }
 
 export class ApprovalWorkflowService {
@@ -156,6 +173,89 @@ export class ApprovalWorkflowService {
   }
 
   /**
+   * Matches the rule's required documents against the evidence attached to the record.
+   * A requirement is met by an active document of the same Master Data document type.
+   */
+  public static async getDocumentRequirements(
+    record: IComplianceRecord
+  ): Promise<DocumentRequirementStatus[]> {
+    const ruleRef = (record.rule || record.complianceRule) as any;
+    const rule = await ComplianceRule.findById(ruleRef?._id || ruleRef)
+      .select('requiredDocuments')
+      .populate('requiredDocuments.documentType', 'code label')
+      .lean();
+
+    const required = rule?.requiredDocuments || [];
+    if (required.length === 0) return [];
+
+    const attached = await CmsDocument.find({
+      _id: { $in: record.documents || [] },
+      status: 'active',
+    })
+      .select('name documentType verificationStatus currentVersion')
+      .lean();
+
+    return required.map((req: any) => {
+      const typeId = req.documentType?._id?.toString() || req.documentType?.toString() || null;
+      const matches = typeId
+        ? attached.filter((doc) => doc.documentType?.toString() === typeId)
+        : [];
+
+      const status: DocumentRequirementStatus['status'] =
+        matches.length === 0
+          ? 'missing'
+          : matches.some((d) => d.verificationStatus === 'verified')
+          ? 'verified'
+          : matches.some((d) => d.verificationStatus === 'pending')
+          ? 'pending'
+          : 'rejected';
+
+      return {
+        documentTypeId: typeId,
+        documentTypeCode: req.documentType?.code,
+        label: req.label || req.documentType?.label || 'Required document',
+        isMandatory: req.isMandatory !== false,
+        status,
+        documents: matches.map((d) => ({
+          _id: d._id.toString(),
+          name: d.name,
+          verificationStatus: d.verificationStatus,
+          currentVersion: d.currentVersion,
+        })),
+      };
+    });
+  }
+
+  /**
+   * Returns why the action cannot proceed given the document checklist, or null when it can.
+   *   - Submit / Resubmit: every mandatory document must be uploaded (and not rejected)
+   *   - Approve: every mandatory document must be verified
+   */
+  public static getDocumentBlocker(
+    action: WorkflowAction,
+    requirements: DocumentRequirementStatus[]
+  ): string | null {
+    const mandatory = requirements.filter((r) => r.isMandatory);
+    const names = (list: DocumentRequirementStatus[]) => list.map((r) => r.label).join(', ');
+
+    if (action === 'Submit' || action === 'Resubmit') {
+      const outstanding = mandatory.filter((r) => r.status === 'missing' || r.status === 'rejected');
+      if (outstanding.length > 0) {
+        return `Upload the required documents before submitting: ${names(outstanding)}.`;
+      }
+    }
+
+    if (action === 'Approve') {
+      const unverified = mandatory.filter((r) => r.status !== 'verified');
+      if (unverified.length > 0) {
+        return `Verify the required documents before approving: ${names(unverified)}.`;
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Validates state transition and returns the resulting target status.
    * Throws 400 Bad Request for any invalid or disallowed transition.
    */
@@ -189,8 +289,12 @@ export class ApprovalWorkflowService {
         if (currentStatus === 'correction' || currentStatus === 'rejected') {
           return 'resubmitted';
         }
+        // An expired record re-enters the cycle as a fresh renewal submission
+        if (currentStatus === 'expired') {
+          return 'submitted';
+        }
         throw ApiError.badRequest(
-          `Invalid transition: Cannot "Submit" a record with current status "${currentStatus}". Submit is only valid for "pending", "correction", or "rejected" records.`
+          `Invalid transition: Cannot "Submit" a record with current status "${currentStatus}". Submit is only valid for "pending", "correction", "rejected", or "expired" records.`
         );
 
       case 'Start Review':
@@ -283,6 +387,15 @@ export class ApprovalWorkflowService {
     // 2. Validate transition
     const newStatus = this.validateTransition(previousStatus, action, comments);
 
+    // 2b. Required documents must be in place for submission and approval
+    const documentBlocker = this.getDocumentBlocker(
+      action,
+      await this.getDocumentRequirements(record)
+    );
+    if (documentBlocker) {
+      throw ApiError.badRequest(documentBlocker);
+    }
+
     // 3. Create persistent Approval record
     const approval = await Approval.create({
       complianceRecord: record._id,
@@ -299,15 +412,20 @@ export class ApprovalWorkflowService {
     // 4. Update dates and record fields
     record.status = newStatus;
 
-    if ((newStatus === 'submitted' || newStatus === 'resubmitted') && !record.submissionDate) {
+    if (
+      (newStatus === 'submitted' || newStatus === 'resubmitted') &&
+      (!record.submissionDate || previousStatus === 'expired')
+    ) {
       record.submissionDate = new Date();
     }
 
     if (newStatus === 'approved') {
       record.approvalDate = new Date();
       // Auto-calculate renewal expiry if rule defines renewal cycle and expiryDate is empty
+      // or already lapsed (renewal of an expired record)
       const rule = await ComplianceRule.findById(record.rule || record.complianceRule);
-      if (rule?.renewalCycle && !record.expiryDate) {
+      const hasValidExpiry = record.expiryDate && record.expiryDate.getTime() > Date.now();
+      if (rule?.renewalCycle && !hasValidExpiry) {
         const exp = new Date();
         exp.setDate(exp.getDate() + rule.renewalCycle);
         record.expiryDate = exp;
@@ -341,17 +459,17 @@ export class ApprovalWorkflowService {
     await record.save();
 
     // 6. Record in Audit Log
-    const auditAction =
-      action === 'Approve' ? 'approve' : action === 'Reject' ? 'reject' : 'update';
-
-    await AuditLog.create({
-      actor: user.userId,
-      actorEmail: user.email,
-      actorRole: user.role,
-      action: auditAction,
-      resource: 'ComplianceRecord',
-      resourceId: record._id,
-      entity: record.entity,
+    await auditService.logMutation({
+      userId: user.userId,
+      userEmail: user.email,
+      role: user.role,
+      action: 'STATUS_CHANGED',
+      module: 'compliance',
+      entityType: 'ComplianceRecord',
+      recordId: record._id,
+      entityId: record.entity as Types.ObjectId,
+      previousValue: { status: previousStatus },
+      newValue: { status: newStatus },
       description: `Workflow Action: "${action}" — transitioned "${record.recordNumber}" from ${previousStatus} to ${newStatus}`,
       metadata: {
         approvalId: approval._id,
@@ -364,8 +482,8 @@ export class ApprovalWorkflowService {
 
     // Return populated record
     const populated = await ComplianceRecord.findById(record._id)
-      .populate('entity', 'name entityCode')
-      .populate('location', 'name locationCode address')
+      .populate('entity', 'name code entityCode')
+      .populate('location', 'name code locationCode address')
       .populate('rule', 'name code category frequency renewalCycle requiredDocuments')
       .populate('assignedUser', 'firstName lastName email fullName role')
       .populate({
@@ -383,7 +501,8 @@ export class ApprovalWorkflowService {
    */
   public static getAvailableActions(
     record: IComplianceRecord,
-    user: WorkflowUserContext
+    user: WorkflowUserContext,
+    requirements: DocumentRequirementStatus[] = []
   ): AvailableActionInfo[] {
     const { role, entityId } = user;
     const actions: AvailableActionInfo[] = [];
@@ -407,6 +526,17 @@ export class ApprovalWorkflowService {
       entityId === recordEntityId;
 
     // 1. Pending → Submit
+    if (currentStatus === 'expired' && isSubmitter) {
+      actions.push({
+        action: 'Submit',
+        label: 'Submit Renewal',
+        targetStatus: 'submitted',
+        variant: 'primary',
+        requiresComments: false,
+        description: 'Submit renewed documentation and evidence for this expired obligation.',
+      });
+    }
+
     if (currentStatus === 'pending' && isSubmitter) {
       actions.push({
         action: 'Submit',
@@ -508,6 +638,11 @@ export class ApprovalWorkflowService {
           description: 'Downgrade full rejection to allow unit manager to submit corrections.',
         });
       }
+    }
+
+    for (const info of actions) {
+      const blocker = this.getDocumentBlocker(info.action, requirements);
+      if (blocker) info.disabledReason = blocker;
     }
 
     return actions;

@@ -18,7 +18,7 @@ import Task, { ITask } from '../models/Task.js';
 import ComplianceRecord, { IComplianceRecord } from '../models/ComplianceRecord.js';
 import User from '../models/User.js';
 import Settings from '../models/Settings.js';
-import AuditLog from '../models/AuditLog.js';
+import { auditService } from './audit.service.js';
 import { NotificationService } from './notification.service.js';
 import { emitTaskAssigned } from './socket.service.js';
 import { ApiError } from '../utils/apiError.js';
@@ -283,12 +283,15 @@ export class TaskAutomationService {
 
     // Audit Log
     if (userContext?.userId) {
-      await AuditLog.create({
-        actor: userContext.userId,
-        action: 'update',
-        resource: 'Task',
-        resourceId: task._id,
-        entity: task.entity,
+      await auditService.logMutation({
+        userId: userContext.userId,
+        action: newStatus === 'completed' ? 'TASK_COMPLETED' : 'TASK_UPDATED',
+        module: 'tasks',
+        entityType: 'Task',
+        recordId: task._id,
+        entityId: task.entity as Types.ObjectId,
+        previousValue: { status: previousStatus },
+        newValue: { status: newStatus },
         description: `Task "${task.title}" status changed from ${previousStatus} to ${newStatus}`,
       });
     }
@@ -338,12 +341,15 @@ export class TaskAutomationService {
     await task.save();
 
     if (userId && updateData.status && previousStatus !== updateData.status) {
-      await AuditLog.create({
-        actor: userId,
-        action: 'update',
-        resource: 'Task',
-        resourceId: task._id,
-        entity: task.entity,
+      await auditService.logMutation({
+        userId,
+        action: updateData.status === 'completed' ? 'TASK_COMPLETED' : 'TASK_UPDATED',
+        module: 'tasks',
+        entityType: 'Task',
+        recordId: task._id,
+        entityId: task.entity as Types.ObjectId,
+        previousValue: { status: previousStatus },
+        newValue: { status: updateData.status },
         description: `Task "${task.title}" status changed from ${previousStatus} to ${updateData.status}`,
       });
     }
@@ -551,8 +557,9 @@ export class TaskAutomationService {
         expiry.setHours(0, 0, 0, 0);
 
         if (expiry < now) {
-          // If not already marked expired, update record status
-          if (record.status !== 'expired') {
+          // Only a granted compliance can lapse. Records still moving through the
+          // workflow keep their status so they can be submitted and reviewed.
+          if (record.status === 'approved' || record.status === 'expiring_soon') {
             record.status = 'expired';
             await record.save();
           }

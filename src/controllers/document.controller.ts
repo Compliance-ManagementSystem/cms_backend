@@ -11,10 +11,20 @@ import fs from 'fs';
 import { Types } from 'mongoose';
 import DocumentModel, { IDocument } from '../models/Document.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
-import AuditLog from '../models/AuditLog.js';
 import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { assertInScope, getAccessScope, isInScope } from '../utils/accessScope.js';
+import { auditService } from '../services/audit.service.js';
+
+// Multer has already written the file by the time the controller runs,
+// so a rejected request must remove it before failing.
+const rejectUpload = (req: Request, error: ApiError): never => {
+  if (req.file?.path) {
+    fs.unlink(req.file.path, () => {});
+  }
+  throw error;
+};
 
 // ── 1. Upload New Document ───────────────────────────────────────────────────
 export const uploadDocument = asyncHandler(async (req: Request, res: Response) => {
@@ -37,10 +47,30 @@ export const uploadDocument = asyncHandler(async (req: Request, res: Response) =
   } = req.body;
 
   const docName = name || title || req.file.originalname;
-  const entityId = entity || req.auth?.entityId;
+  let entityId = entity || req.auth?.entityId;
+  let locationId = location;
+
+  // A document attached to a compliance record always inherits that record's entity & location
+  if (complianceRecordId) {
+    const record = Types.ObjectId.isValid(complianceRecordId)
+      ? await ComplianceRecord.findById(complianceRecordId).select('entity location')
+      : null;
+    if (!record) {
+      return rejectUpload(req, ApiError.notFound('Compliance record not found.'));
+    }
+    entityId = String(record.entity);
+    locationId = String(record.location);
+  }
 
   if (!entityId) {
-    throw ApiError.badRequest('Entity ID is required for document upload.');
+    return rejectUpload(req, ApiError.badRequest('Entity ID is required for document upload.'));
+  }
+
+  if (!isInScope(getAccessScope(req), { entity: entityId, location: locationId })) {
+    return rejectUpload(
+      req,
+      ApiError.forbidden('You are not authorized to upload documents outside your assigned entity or location.')
+    );
   }
 
   const fileUrl = `/uploads/compliance-documents/${req.file.filename}`;
@@ -66,12 +96,12 @@ export const uploadDocument = asyncHandler(async (req: Request, res: Response) =
     documentType: documentType || undefined,
     description,
     entity: new Types.ObjectId(entityId),
-    location: location ? new Types.ObjectId(location) : undefined,
+    location: locationId ? new Types.ObjectId(locationId) : undefined,
     complianceRecord: complianceRecordId ? new Types.ObjectId(complianceRecordId) : undefined,
     relatedTo: complianceRecordId
       ? { model: 'ComplianceRecord', id: new Types.ObjectId(complianceRecordId) }
-      : location
-      ? { model: 'Location', id: new Types.ObjectId(location) }
+      : locationId
+      ? { model: 'Location', id: new Types.ObjectId(locationId) }
       : { model: 'Entity', id: new Types.ObjectId(entityId) },
     version: 1,
     currentVersion: 1,
@@ -102,21 +132,7 @@ export const uploadDocument = asyncHandler(async (req: Request, res: Response) =
     });
   }
 
-  // Audit log
-  await AuditLog.create({
-    user: uploadedBy,
-    action: 'CREATE',
-    resource: 'Document',
-    resourceId: document._id,
-    entity: entityId,
-    location: location || undefined,
-    description: `Uploaded document "${document.name}" (v1)`,
-    metadata: {
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-      complianceRecord: complianceRecordId,
-    },
-  });
+  await auditService.logDocumentUploaded(document, req);
 
   return ApiResponse.created(res, { document }, 'Document uploaded successfully');
 });
@@ -130,7 +146,14 @@ export const replaceDocument = asyncHandler(async (req: Request, res: Response) 
 
   const document = await DocumentModel.findById(id);
   if (!document) {
-    throw ApiError.notFound('Document not found.');
+    return rejectUpload(req, ApiError.notFound('Document not found.'));
+  }
+
+  if (!isInScope(getAccessScope(req), document)) {
+    return rejectUpload(
+      req,
+      ApiError.forbidden('You are not authorized to replace documents outside your assigned entity or location.')
+    );
   }
 
   const notes = req.body.notes || 'Replaced document file';
@@ -176,22 +199,7 @@ export const replaceDocument = asyncHandler(async (req: Request, res: Response) 
 
   await document.save();
 
-  // Audit log
-  await AuditLog.create({
-    user: uploadedBy,
-    action: 'UPDATE',
-    resource: 'Document',
-    resourceId: document._id,
-    entity: document.entity,
-    location: document.location || undefined,
-    description: `Replaced document "${document.name}" with new version v${newVersionNumber}`,
-    metadata: {
-      previousVersion: newVersionNumber - 1,
-      newVersion: newVersionNumber,
-      fileName: req.file.originalname,
-      fileSize: req.file.size,
-    },
-  });
+  await auditService.logDocumentReplaced(document, newVersionNumber - 1, req);
 
   return ApiResponse.success(res, { document }, `Document version v${newVersionNumber} uploaded successfully`);
 });
@@ -211,6 +219,8 @@ export const getDocumentById = asyncHandler(async (req: Request, res: Response) 
     throw ApiError.notFound('Document not found.');
   }
 
+  assertInScope(req, document);
+
   return ApiResponse.success(res, { document });
 });
 
@@ -223,6 +233,8 @@ export const downloadDocument = asyncHandler(async (req: Request, res: Response)
   if (!document) {
     throw ApiError.notFound('Document not found.');
   }
+
+  assertInScope(req, document);
 
   let targetFileUrl = document.fileUrl;
   let targetFileName = document.fileName;
@@ -257,6 +269,8 @@ export const previewDocument = asyncHandler(async (req: Request, res: Response) 
   if (!document) {
     throw ApiError.notFound('Document not found.');
   }
+
+  assertInScope(req, document);
 
   let targetFileUrl = document.fileUrl;
   let targetMimeType = document.mimeType;
@@ -296,6 +310,9 @@ export const verifyDocument = asyncHandler(async (req: Request, res: Response) =
     throw ApiError.notFound('Document not found.');
   }
 
+  assertInScope(req, document);
+
+  const previousVerificationStatus = document.verificationStatus;
   document.verificationStatus = verificationStatus;
   document.verifiedBy = new Types.ObjectId(req.auth?.userId);
   document.verifiedAt = new Date();
@@ -304,16 +321,17 @@ export const verifyDocument = asyncHandler(async (req: Request, res: Response) =
 
   await document.save();
 
-  // Audit log
-  await AuditLog.create({
-    user: req.auth?.userId,
-    action: 'UPDATE',
-    resource: 'Document',
-    resourceId: document._id,
-    entity: document.entity,
-    location: document.location || undefined,
+  await auditService.logMutation({
+    req,
+    action: 'DOCUMENT_VERIFIED',
+    module: 'documents',
+    entityType: 'Document',
+    recordId: document._id,
+    entityId: document.entity as Types.ObjectId,
+    previousValue: { verificationStatus: previousVerificationStatus },
+    newValue: { verificationStatus },
     description: `Document "${document.name}" marked as ${verificationStatus}`,
-    metadata: { verificationStatus, notes },
+    metadata: { notes },
   });
 
   return ApiResponse.success(res, { document }, `Document marked as ${verificationStatus}`);
@@ -328,6 +346,8 @@ export const deleteDocument = asyncHandler(async (req: Request, res: Response) =
     throw ApiError.notFound('Document not found.');
   }
 
+  assertInScope(req, document);
+
   // Remove reference from compliance record if linked
   if (document.complianceRecord) {
     await ComplianceRecord.findByIdAndUpdate(document.complianceRecord, {
@@ -338,6 +358,18 @@ export const deleteDocument = asyncHandler(async (req: Request, res: Response) =
   // Soft-delete: mark as archived
   document.status = 'archived';
   await document.save();
+
+  await auditService.logMutation({
+    req,
+    action: 'DOCUMENT_DELETED',
+    module: 'documents',
+    entityType: 'Document',
+    recordId: document._id,
+    entityId: document.entity as Types.ObjectId,
+    previousValue: { name: document.name, status: 'active' },
+    newValue: { status: 'archived' },
+    description: `Archived document "${document.name}"`,
+  });
 
   return ApiResponse.success(res, null, 'Document archived successfully');
 });

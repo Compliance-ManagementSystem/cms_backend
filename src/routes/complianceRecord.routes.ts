@@ -12,7 +12,8 @@
  */
 
 import { Router } from 'express';
-import { authenticate } from '../middlewares/auth.middleware.js';
+import { authenticate, authorize, requirePermission } from '../middlewares/auth.middleware.js';
+import { PERMISSIONS, ROLES } from '../constants/permissions.js';
 import {
   getComplianceRecords,
   getComplianceRecordById,
@@ -29,14 +30,25 @@ const router = Router();
 
 router.use(authenticate);
 
-router.get('/', getComplianceRecords);
-router.post('/', createComplianceRecord);
-router.post('/generate-for-location', generateRecordsForLocation);
-router.get('/:id', getComplianceRecordById);
-router.put('/:id', updateComplianceRecord);
-router.patch('/:id/status', updateComplianceRecordStatus);
+router.get('/', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_READ), getComplianceRecords);
+router.post('/', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_CREATE), createComplianceRecord);
+router.post(
+  '/generate-for-location',
+  requirePermission(PERMISSIONS.COMPLIANCE_RECORD_CREATE),
+  generateRecordsForLocation
+);
+router.get('/:id', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_READ), getComplianceRecordById);
+router.put('/:id', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_UPDATE), updateComplianceRecord);
+// Direct status override bypasses the approval state machine — administrators only.
+// Everyone else transitions records through POST /:id/workflow.
+router.patch('/:id/status', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), updateComplianceRecordStatus);
+// Role and transition rules are enforced by ApprovalWorkflowService
 router.post('/:id/workflow', executeWorkflowAction);
-router.get('/:id/approvals', getComplianceRecordApprovals);
-router.delete('/:id', deleteComplianceRecord);
+router.get(
+  '/:id/approvals',
+  requirePermission(PERMISSIONS.COMPLIANCE_RECORD_READ),
+  getComplianceRecordApprovals
+);
+router.delete('/:id', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_DELETE), deleteComplianceRecord);
 
 export default router;

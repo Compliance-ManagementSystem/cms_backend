@@ -2,7 +2,6 @@ import express, { Application } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
-import path from 'path';
 import { env } from './config/env.js';
 import { requestLogger } from './middlewares/requestLogger.middleware.js';
 import { notFoundMiddleware } from './middlewares/notFound.middleware.js';
@@ -38,9 +37,6 @@ const createApp = (): Application => {
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
   app.use(cookieParser());
-
-  // ── Static Files (Uploaded Documents) ─────────────────────────────────────
-  app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
   // ── Request logging ───────────────────────────────────────────────────────
   app.use(requestLogger);

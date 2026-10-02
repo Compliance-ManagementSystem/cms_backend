@@ -117,6 +117,9 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   // 7. Audit Log
   await AuditLog.create({
     action: 'login',
+    module: 'auth',
+    entityType: 'User',
+    recordId: user._id,
     resource: 'User',
     resourceId: user._id,
     entity: user.entity || undefined,

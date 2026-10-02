@@ -11,7 +11,6 @@ import ComplianceRecord, { ComplianceRecordStatus } from '../models/ComplianceRe
 import ComplianceRule from '../models/ComplianceRule.js';
 import Location from '../models/Location.js';
 import Entity from '../models/Entity.js';
-import AuditLog from '../models/AuditLog.js';
 import { RuleEngineService } from '../services/ruleEngine.service.js';
 import { ApprovalWorkflowService } from '../services/approvalWorkflow.service.js';
 import {
@@ -24,62 +23,74 @@ import {
 import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
+import { assertInScope, getAccessScope, toScopeFilter } from '../utils/accessScope.js';
+import { auditService } from '../services/audit.service.js';
 
 // ── 1. Get Compliance Records (Paginated, Filtered & Real Counts) ──────────────
 export const getComplianceRecords = asyncHandler(async (req: Request, res: Response) => {
   const query = complianceRecordQuerySchema.parse(req.query);
 
-  const filter: Record<string, any> = {};
-
-  // RBAC entity/location scoping
-  const userRole = req.auth?.role;
-  const userEntityId = req.auth?.entityId;
-  const userLocationId = req.auth?.locationId;
-
-  if (userRole === 'entity_admin' && userEntityId) {
-    filter.entity = new Types.ObjectId(userEntityId);
-  } else if (userRole === 'location_manager' && userLocationId) {
-    filter.location = new Types.ObjectId(userLocationId);
-  }
+  // RBAC entity/location scoping — always applied, explicit filters only narrow it
+  const scopeFilter = toScopeFilter(getAccessScope(req));
+  const conditions: Record<string, any>[] = [scopeFilter];
 
   // Explicit filters
   if (query.entity) {
-    filter.entity = new Types.ObjectId(query.entity);
+    conditions.push({ entity: new Types.ObjectId(query.entity) });
   }
   if (query.location) {
-    filter.location = new Types.ObjectId(query.location);
+    conditions.push({ location: new Types.ObjectId(query.location) });
   }
   if (query.rule) {
-    filter.$or = [
-      { rule: new Types.ObjectId(query.rule) },
-      { complianceRule: new Types.ObjectId(query.rule) },
-    ];
+    conditions.push({
+      $or: [
+        { rule: new Types.ObjectId(query.rule) },
+        { complianceRule: new Types.ObjectId(query.rule) },
+      ],
+    });
   }
   if (query.status) {
-    filter.status = query.status;
+    const statuses = query.status.split(',').map((s) => s.trim()).filter(Boolean);
+    conditions.push({ status: statuses.length > 1 ? { $in: statuses } : statuses[0] });
   }
   if (query.assignedUser) {
-    filter.assignedUser = new Types.ObjectId(query.assignedUser);
+    conditions.push({ assignedUser: new Types.ObjectId(query.assignedUser) });
   }
 
   // Date range filters
   if (query.dueDateFrom || query.dueDateTo) {
-    filter.dueDate = {};
-    if (query.dueDateFrom) filter.dueDate.$gte = new Date(query.dueDateFrom);
-    if (query.dueDateTo) filter.dueDate.$lte = new Date(query.dueDateTo);
+    const dueDate: Record<string, Date> = {};
+    if (query.dueDateFrom) dueDate.$gte = new Date(query.dueDateFrom);
+    if (query.dueDateTo) dueDate.$lte = new Date(query.dueDateTo);
+    conditions.push({ dueDate });
   }
 
   if (query.expiryDateFrom || query.expiryDateTo) {
-    filter.expiryDate = {};
-    if (query.expiryDateFrom) filter.expiryDate.$gte = new Date(query.expiryDateFrom);
-    if (query.expiryDateTo) filter.expiryDate.$lte = new Date(query.expiryDateTo);
+    const expiryDate: Record<string, Date> = {};
+    if (query.expiryDateFrom) expiryDate.$gte = new Date(query.expiryDateFrom);
+    if (query.expiryDateTo) expiryDate.$lte = new Date(query.expiryDateTo);
+    conditions.push({ expiryDate });
   }
 
-  // Text search on recordNumber or regex on populated rule/location
-  if (query.search) {
-    const searchRegex = new RegExp(query.search.trim(), 'i');
-    filter.$or = [{ recordNumber: searchRegex }, { comments: searchRegex }, { notes: searchRegex }];
+  // Text search on recordNumber, comments and notes
+  if (query.search?.trim()) {
+    const escaped = query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const searchRegex = new RegExp(escaped, 'i');
+    conditions.push({
+      $or: [{ recordNumber: searchRegex }, { comments: searchRegex }, { notes: searchRegex }],
+    });
   }
+
+  // Overdue: past the due date and still waiting on the submitting unit
+  const overdueCondition = {
+    dueDate: { $lt: new Date() },
+    status: { $in: ['pending', 'correction', 'rejected'] },
+  };
+  if (query.overdue === 'true') {
+    conditions.push(overdueCondition);
+  }
+
+  const filter = { $and: conditions };
 
   const page = query.page;
   const limit = query.limit;
@@ -89,10 +100,10 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
     [query.sortBy]: query.sortOrder === 'asc' ? 1 : -1,
   };
 
-  const [records, total, metricsAggregation] = await Promise.all([
+  const [records, total, metricsAggregation, overdueCount] = await Promise.all([
     ComplianceRecord.find(filter)
-      .populate('entity', 'name entityCode address')
-      .populate('location', 'name locationCode address')
+      .populate('entity', 'name code entityCode address')
+      .populate('location', 'name code locationCode address')
       .populate({
         path: 'rule',
         populate: [
@@ -102,16 +113,16 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
         ],
       })
       .populate('assignedUser', 'firstName lastName email fullName')
-      .populate('documents', 'name fileName fileSize verificationStatus currentVersion fileUrl')
+      .populate('documents', 'name fileName fileSize verificationStatus currentVersion documentType status')
       .sort(sort)
       .skip(skip)
-      .limit(limit)
-      .lean(),
+      .limit(limit),
 
     ComplianceRecord.countDocuments(filter),
 
     // Real status counts for summary metrics
     ComplianceRecord.aggregate([
+      { $match: scopeFilter },
       {
         $group: {
           _id: '$status',
@@ -119,6 +130,8 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
         },
       },
     ]),
+
+    ComplianceRecord.countDocuments({ $and: [scopeFilter, overdueCondition] }),
   ]);
 
   // Format real metrics
@@ -129,8 +142,11 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
     under_review: 0,
     approved: 0,
     rejected: 0,
+    correction: 0,
+    resubmitted: 0,
     expiring_soon: 0,
     expired: 0,
+    overdue: overdueCount,
   };
 
   metricsAggregation.forEach((item: { _id: string; count: number }) => {
@@ -157,8 +173,8 @@ export const getComplianceRecordById = asyncHandler(async (req: Request, res: Re
   const { id } = req.params;
 
   const record = await ComplianceRecord.findById(id)
-    .populate('entity', 'name entityCode address contactEmail contactPhone')
-    .populate('location', 'name locationCode address manager contactEmail')
+    .populate('entity', 'name code entityCode address contactEmail contactPhone')
+    .populate('location', 'name code locationCode address manager contactEmail')
     .populate({
       path: 'rule',
       populate: [
@@ -184,6 +200,8 @@ export const getComplianceRecordById = asyncHandler(async (req: Request, res: Re
     throw ApiError.notFound('Compliance record not found.');
   }
 
+  assertInScope(req, record);
+
   return ApiResponse.success(res, { record });
 });
 
@@ -200,6 +218,8 @@ export const createComplianceRecord = asyncHandler(async (req: Request, res: Res
   if (!entity) throw ApiError.notFound('Target entity not found.');
   if (!location) throw ApiError.notFound('Target location not found.');
   if (!rule) throw ApiError.notFound('Target compliance rule not found.');
+
+  assertInScope(req, { entity: validated.entity, location: validated.location });
 
   // Check if a record already exists for this (location × rule)
   const existing = await ComplianceRecord.findOne({
@@ -230,7 +250,7 @@ export const createComplianceRecord = asyncHandler(async (req: Request, res: Res
     expiryDate: validated.expiryDate ? new Date(validated.expiryDate) : undefined,
     comments: validated.comments,
     notes: validated.notes,
-    status: validated.status || 'pending',
+    status: 'pending',
     currentVersion: 1,
     createdBy: req.auth?.userId,
     updatedBy: req.auth?.userId,
@@ -238,25 +258,11 @@ export const createComplianceRecord = asyncHandler(async (req: Request, res: Res
 
   await record.save();
 
-  // Audit Log
-  await AuditLog.create({
-    user: req.auth?.userId,
-    action: 'CREATE',
-    resource: 'ComplianceRecord',
-    resourceId: record._id,
-    entity: record.entity,
-    location: record.location,
-    description: `Created compliance record "${record.recordNumber}" for rule "${rule.name}"`,
-    metadata: {
-      ruleCode: rule.code,
-      locationId: validated.location,
-      dueDate,
-    },
-  });
+  await auditService.logComplianceCreated(record, req);
 
   const populated = await ComplianceRecord.findById(record._id)
-    .populate('entity', 'name entityCode')
-    .populate('location', 'name locationCode')
+    .populate('entity', 'name code entityCode')
+    .populate('location', 'name code locationCode')
     .populate('rule', 'name code');
 
   return ApiResponse.created(res, { record: populated }, 'Compliance record created successfully');
@@ -270,6 +276,15 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
   const record = await ComplianceRecord.findById(id);
   if (!record) throw ApiError.notFound('Compliance record not found.');
 
+  assertInScope(req, record);
+
+  const previousValue = {
+    recordNumber: record.recordNumber,
+    status: record.status,
+    dueDate: record.dueDate,
+    expiryDate: record.expiryDate,
+  };
+
   if (validated.assignedUser !== undefined) record.assignedUser = validated.assignedUser as any;
   if (validated.dueDate) record.dueDate = new Date(validated.dueDate);
   if (validated.expiryDate) record.expiryDate = new Date(validated.expiryDate);
@@ -277,24 +292,15 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
   if (validated.approvalDate) record.approvalDate = new Date(validated.approvalDate);
   if (validated.comments !== undefined) record.comments = validated.comments;
   if (validated.notes !== undefined) record.notes = validated.notes;
-  if (validated.status) record.status = validated.status as ComplianceRecordStatus;
 
   record.updatedBy = req.auth?.userId as any;
   await record.save();
 
-  await AuditLog.create({
-    user: req.auth?.userId,
-    action: 'UPDATE',
-    resource: 'ComplianceRecord',
-    resourceId: record._id,
-    entity: record.entity,
-    location: record.location,
-    description: `Updated compliance record "${record.recordNumber}"`,
-  });
+  await auditService.logComplianceUpdated(record, previousValue, req);
 
   const populated = await ComplianceRecord.findById(record._id)
-    .populate('entity', 'name entityCode')
-    .populate('location', 'name locationCode')
+    .populate('entity', 'name code entityCode')
+    .populate('location', 'name code locationCode')
     .populate('rule', 'name code')
     .populate('assignedUser', 'firstName lastName email fullName');
 
@@ -361,21 +367,11 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
 
   await record.save();
 
-  // Audit log
-  await AuditLog.create({
-    user: req.auth?.userId,
-    action: 'STATUS_CHANGE',
-    resource: 'ComplianceRecord',
-    resourceId: record._id,
-    entity: record.entity,
-    location: record.location,
-    description: `Compliance record "${record.recordNumber}" transitioned from ${previousStatus} to ${status}`,
-    metadata: { previousStatus, newStatus: status, comments },
-  });
+  await auditService.logStatusChanged(record, previousStatus, status, req);
 
   const updatedRecord = await ComplianceRecord.findById(id)
-    .populate('entity', 'name entityCode')
-    .populate('location', 'name locationCode')
+    .populate('entity', 'name code entityCode')
+    .populate('location', 'name code locationCode')
     .populate('rule', 'name code')
     .populate('assignedUser', 'firstName lastName email fullName')
     .populate('approvals.approver', 'firstName lastName email fullName');
@@ -397,11 +393,17 @@ export const generateRecordsForLocation = asyncHandler(async (req: Request, res:
 
   const entityId = location.entity;
 
+  assertInScope(req, { entity: entityId, location: location._id });
+
   // Evaluate applicable rules using RuleEngineService
-  const applicableRules = await RuleEngineService.getApplicableRules({
+  const evaluation = await RuleEngineService.getApplicableRules({
     locationId: location._id.toString(),
-    entityId: entityId.toString(),
+    entityId: String(entityId),
   });
+
+  const applicableRules = await ComplianceRule.find({
+    _id: { $in: evaluation.applicableRules.map((r) => r.ruleId) },
+  }).select('renewalCycle');
 
   const createdRecords: any[] = [];
 
@@ -428,6 +430,7 @@ export const generateRecordsForLocation = asyncHandler(async (req: Request, res:
       });
 
       await newRecord.save();
+      await auditService.logComplianceCreated(newRecord, req);
       createdRecords.push(newRecord);
     }
   }
@@ -450,16 +453,19 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
   const record = await ComplianceRecord.findById(id);
   if (!record) throw ApiError.notFound('Compliance record not found.');
 
+  assertInScope(req, record);
+
   await ComplianceRecord.findByIdAndDelete(id);
 
-  await AuditLog.create({
-    user: req.auth?.userId,
-    action: 'DELETE',
-    resource: 'ComplianceRecord',
-    resourceId: record._id,
-    entity: record.entity,
-    location: record.location,
-    description: `Deleted compliance record "${record.recordNumber}"`,
+  await auditService.logMutation({
+    req,
+    action: 'COMPLIANCE_DELETED',
+    module: 'compliance',
+    entityType: 'ComplianceRecord',
+    recordId: record._id,
+    entityId: record.entity as Types.ObjectId,
+    previousValue: { recordNumber: record.recordNumber, status: record.status },
+    description: `Deleted statutory compliance record '${record.recordNumber}'`,
   });
 
   return ApiResponse.success(res, null, 'Compliance record deleted successfully');
@@ -469,6 +475,10 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
 export const executeWorkflowAction = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const validated = executeWorkflowActionSchema.parse(req.body);
+
+  const target = await ComplianceRecord.findById(id).select('entity location');
+  if (!target) throw ApiError.notFound('Compliance record not found.');
+  assertInScope(req, target);
 
   const result = await ApprovalWorkflowService.executeWorkflowAction({
     recordId: id,
@@ -501,20 +511,29 @@ export const getComplianceRecordApprovals = asyncHandler(async (req: Request, re
     throw ApiError.notFound('Compliance record not found.');
   }
 
-  const [approvals, availableActions] = await Promise.all([
+  assertInScope(req, record);
+
+  const [approvals, documentRequirements] = await Promise.all([
     ApprovalWorkflowService.getRecordApprovals(id, 'desc'),
-    ApprovalWorkflowService.getAvailableActions(record, {
+    ApprovalWorkflowService.getDocumentRequirements(record),
+  ]);
+
+  const availableActions = ApprovalWorkflowService.getAvailableActions(
+    record,
+    {
       userId: req.auth!.userId,
       email: req.auth!.email,
       role: req.auth!.role,
       entityId: req.auth!.entityId,
-    }),
-  ]);
+    },
+    documentRequirements
+  );
 
   return ApiResponse.success(res, {
     currentStatus: record.status,
     approvals,
     availableActions,
+    documentRequirements,
   });
 });
 

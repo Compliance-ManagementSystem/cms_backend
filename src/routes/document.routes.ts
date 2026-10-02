@@ -6,7 +6,8 @@
  */
 
 import { Router } from 'express';
-import { authenticate } from '../middlewares/auth.middleware.js';
+import { authenticate, requirePermission } from '../middlewares/auth.middleware.js';
+import { PERMISSIONS } from '../constants/permissions.js';
 import { uploadDocumentFile } from '../middlewares/upload.middleware.js';
 import {
   uploadDocument,
@@ -20,15 +21,15 @@ import {
 
 const router = Router();
 
-// Public/authenticated access
 router.use(authenticate);
 
-router.post('/upload', uploadDocumentFile, uploadDocument);
-router.post('/:id/replace', uploadDocumentFile, replaceDocument);
-router.get('/:id', getDocumentById);
-router.get('/:id/download', downloadDocument);
-router.get('/:id/preview', previewDocument);
-router.patch('/:id/verify', verifyDocument);
-router.delete('/:id', deleteDocument);
+// Permission checks run before multer so unauthorized uploads never reach disk
+router.post('/upload', requirePermission(PERMISSIONS.DOCUMENT_UPLOAD), uploadDocumentFile, uploadDocument);
+router.post('/:id/replace', requirePermission(PERMISSIONS.DOCUMENT_UPLOAD), uploadDocumentFile, replaceDocument);
+router.get('/:id', requirePermission(PERMISSIONS.DOCUMENT_READ), getDocumentById);
+router.get('/:id/download', requirePermission(PERMISSIONS.DOCUMENT_DOWNLOAD), downloadDocument);
+router.get('/:id/preview', requirePermission(PERMISSIONS.DOCUMENT_READ), previewDocument);
+router.patch('/:id/verify', requirePermission(PERMISSIONS.DOCUMENT_UPDATE), verifyDocument);
+router.delete('/:id', requirePermission(PERMISSIONS.DOCUMENT_DELETE), deleteDocument);
 
 export default router;

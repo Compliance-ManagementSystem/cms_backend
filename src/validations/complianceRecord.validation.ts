@@ -13,21 +13,6 @@ export const createComplianceRecordSchema = z.object({
   expiryDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
   comments: z.string().optional(),
   notes: z.string().optional(),
-  status: z
-    .enum([
-      'pending',
-      'submitted',
-      'under_review',
-      'approved',
-      'rejected',
-      'correction',
-      'resubmitted',
-      'expiring_soon',
-      'expired',
-      'in_progress',
-      'not_applicable',
-    ])
-    .optional(),
 });
 
 export const updateComplianceRecordSchema = createComplianceRecordSchema.partial().extend({
@@ -70,7 +55,8 @@ export const complianceRecordQuerySchema = z.object({
   entity: z.string().optional(),
   location: z.string().optional(),
   rule: z.string().optional(),
-  status: z.string().optional(),
+  status: z.string().optional(), // single status or comma-separated list
+  overdue: z.enum(['true', 'false']).optional(),
   assignedUser: z.string().optional(),
   dueDateFrom: z.string().optional(),
   dueDateTo: z.string().optional(),
