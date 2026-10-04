@@ -32,9 +32,15 @@ const idOf = (value: unknown): string | null => {
 };
 
 /** Can the caller see this location at all? */
-const canViewLocation = (scope: AccessScope, location: { _id: unknown; entity?: unknown }): boolean => {
+const canViewLocation = (
+  scope: AccessScope,
+  location: { _id: unknown; entity?: unknown; coEntities?: { entity?: unknown }[] }
+): boolean => {
   if (scope.unrestricted) return true;
-  if (scope.entityId && idOf(location.entity) !== scope.entityId) return false;
+  if (scope.entityId) {
+    const entityIds = [location.entity, ...(location.coEntities || []).map((co) => co.entity)].map(idOf);
+    if (!entityIds.includes(scope.entityId)) return false;
+  }
   if (scope.locationIds && !scope.locationIds.includes(idOf(location._id)!)) return false;
   return true;
 };
@@ -131,11 +137,34 @@ const toAgreements = (agreements: any[]) =>
     notes: agr.notes ? agr.notes.trim() : undefined,
   }));
 
+// Co-entities must exist, differ from the owner and not repeat
+const resolveCoEntities = async (coEntities: any[], ownerEntityId: string) => {
+  const ids = [...new Set(coEntities.map((co) => String(co.entity)))];
+  if (ids.length !== coEntities.length) {
+    throw ApiError.badRequest('The same co-entity is listed more than once');
+  }
+  if (ids.includes(ownerEntityId)) {
+    throw ApiError.badRequest('A co-entity must be different from the owning entity');
+  }
+  const found = await Entity.countDocuments({ _id: { $in: ids } });
+  if (found !== ids.length) {
+    throw ApiError.badRequest('Co-entity not found');
+  }
+  return coEntities.map((co) => ({
+    entity: new Types.ObjectId(String(co.entity)),
+    openingDate: co.openingDate ? new Date(co.openingDate) : undefined,
+  }));
+};
+
 const auditSnapshot = (location: ILocation) => ({
   name: location.name,
   code: location.code,
   status: location.status,
+  areaType: location.areaType,
+  operatingModel: location.operatingModel,
+  closingDate: location.closingDate,
   entity: idOf(location.entity),
+  coEntities: (location.coEntities || []).map((co) => idOf(co.entity)),
   locationType: idOf(location.locationType),
   manager: idOf(location.manager),
   parentLocation: idOf(location.parentLocation),
@@ -145,7 +174,7 @@ const auditSnapshot = (location: ILocation) => ({
 
 // ── 1. Get Paginated Locations with Search, Filter & Sorting ───────────────────
 export const getLocations = asyncHandler(async (req: Request, res: Response) => {
-  const { page, limit, search, entity, locationType, status, state, district, city, attention, sortBy, sortOrder } =
+  const { page, limit, search, entity, locationType, status, state, district, city, areaType, attention, sortBy, sortOrder } =
     locationQuerySchema.parse(req.query);
 
   const emptyPage = () =>
@@ -196,6 +225,7 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
   if (state) conditions.push({ 'address.state': exactMatch(state) });
   if (district) conditions.push({ 'address.district': exactMatch(district) });
   if (city) conditions.push({ 'address.city': exactMatch(city) });
+  if (areaType) conditions.push({ areaType });
 
   if (search) {
     const searchRegex = new RegExp(escapeRegex(search), 'i');
@@ -226,6 +256,7 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
   const [locations, total, activeCount, matchingIds] = await Promise.all([
     Location.find(query)
       .populate('entity', 'name code status')
+      .populate('coEntities.entity', 'name code')
       .populate('locationType', 'code label description')
       .populate('manager', 'firstName lastName email phone')
       .populate('parentLocation', 'name code')
@@ -288,6 +319,7 @@ export const getLocationById = asyncHandler(async (req: Request, res: Response) 
 
   const location = await Location.findById(id)
     .populate('entity', 'name code status contactEmail contactPhone address')
+    .populate('coEntities.entity', 'name code')
     .populate('locationType', 'code label description')
     .populate('manager', 'firstName lastName email phone role')
     .populate('parentLocation', 'name code locationType')
@@ -392,6 +424,10 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
     contactPhone,
     manager,
     openingDate,
+    closingDate,
+    areaType,
+    operatingModel,
+    coEntities,
     description,
     area,
     areaUnit,
@@ -437,10 +473,10 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
     address: {
       line1: address.line1.trim(),
       line2: address.line2?.trim() || '',
-      city: address.city.trim(),
+      city: address.city?.trim() || '',
       district: address.district?.trim() || '',
       state: address.state.trim(),
-      pincode: address.pincode.trim(),
+      pincode: address.pincode?.trim() || '',
       country: address.country?.trim() || 'India',
     },
     contactPerson: contactPerson?.trim() || undefined,
@@ -448,6 +484,10 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
     contactPhone: contactPhone?.trim() || undefined,
     manager: managerId,
     openingDate: openingDate ? new Date(openingDate) : undefined,
+    closingDate: closingDate ? new Date(closingDate) : undefined,
+    areaType: areaType || undefined,
+    operatingModel: operatingModel || undefined,
+    coEntities: Array.isArray(coEntities) ? await resolveCoEntities(coEntities, entityId) : [],
     description: description?.trim() || undefined,
     area: area !== undefined && area !== null ? area : undefined,
     areaUnit: areaUnit || 'sqft',
@@ -463,6 +503,7 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
 
   const populated = await Location.findById(newLocation._id)
     .populate('entity', 'name code')
+    .populate('coEntities.entity', 'name code')
     .populate('locationType', 'code label')
     .populate('manager', 'firstName lastName email phone')
     .lean();
@@ -506,6 +547,10 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
     contactPhone,
     manager,
     openingDate,
+    closingDate,
+    areaType,
+    operatingModel,
+    coEntities,
     description,
     area,
     areaUnit,
@@ -576,6 +621,19 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
   if (openingDate !== undefined) {
     existingLocation.openingDate = openingDate ? new Date(openingDate) : undefined;
   }
+  if (closingDate !== undefined) {
+    existingLocation.closingDate = closingDate ? new Date(closingDate) : undefined;
+  }
+  if (areaType !== undefined) existingLocation.areaType = areaType || undefined;
+  if (operatingModel !== undefined) existingLocation.operatingModel = operatingModel || undefined;
+  if (Array.isArray(coEntities)) {
+    existingLocation.coEntities = await resolveCoEntities(coEntities, targetEntityId);
+  } else if (
+    targetEntityId !== currentEntityId &&
+    existingLocation.coEntities.some((co) => String(co.entity) === targetEntityId)
+  ) {
+    throw ApiError.badRequest('The new owning entity is already a co-entity of this location');
+  }
   if (description !== undefined) existingLocation.description = description?.trim() || '';
   if (area !== undefined) existingLocation.area = area !== null ? area : undefined;
   if (areaUnit !== undefined) existingLocation.areaUnit = areaUnit;
@@ -593,10 +651,10 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
     existingLocation.address = {
       line1: address.line1.trim(),
       line2: address.line2?.trim() || '',
-      city: address.city.trim(),
+      city: address.city?.trim() || '',
       district: address.district?.trim() || '',
       state: address.state.trim(),
-      pincode: address.pincode.trim(),
+      pincode: address.pincode?.trim() || '',
       country: address.country?.trim() || existingLocation.address.country || 'India',
     };
   }
@@ -608,6 +666,7 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
 
   const updatedPopulated = await Location.findById(existingLocation._id)
     .populate('entity', 'name code')
+    .populate('coEntities.entity', 'name code')
     .populate('locationType', 'code label')
     .populate('manager', 'firstName lastName email phone')
     .lean();

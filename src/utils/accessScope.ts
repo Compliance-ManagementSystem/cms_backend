@@ -85,7 +85,9 @@ export const toLocationScopeFilter = (scope: AccessScope): Record<string, any> =
 
   const filter: Record<string, any> = {};
   if (scope.entityId) {
-    filter.entity = new Types.ObjectId(scope.entityId);
+    // A unit is visible to its owner and to any co-entity operating there
+    const entityId = new Types.ObjectId(scope.entityId);
+    filter.$or = [{ entity: entityId }, { 'coEntities.entity': entityId }];
   }
   if (scope.locationIds) {
     filter._id = { $in: scope.locationIds.map((id) => new Types.ObjectId(id)) };

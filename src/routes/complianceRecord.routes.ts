@@ -12,8 +12,8 @@
  */
 
 import { Router } from 'express';
-import { authenticate, authorize, requirePermission } from '../middlewares/auth.middleware.js';
-import { PERMISSIONS, ROLES } from '../constants/permissions.js';
+import { authenticate, requirePermission } from '../middlewares/auth.middleware.js';
+import { PERMISSIONS } from '../constants/permissions.js';
 import {
   getComplianceRecords,
   getComplianceRecordById,
@@ -39,9 +39,14 @@ router.post(
 );
 router.get('/:id', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_READ), getComplianceRecordById);
 router.put('/:id', requirePermission(PERMISSIONS.COMPLIANCE_RECORD_UPDATE), updateComplianceRecord);
-// Direct status override bypasses the approval state machine — administrators only.
-// Everyone else transitions records through POST /:id/workflow.
-router.patch('/:id/status', authorize(ROLES.SUPER_ADMIN, ROLES.ADMIN), updateComplianceRecordStatus);
+// Direct status update, as on the Location Master sheet: anyone who may edit records
+// sets the status (and licence details) in one step, within their entity / location scope.
+// POST /:id/workflow remains for the step-by-step approval route.
+router.patch(
+  '/:id/status',
+  requirePermission(PERMISSIONS.COMPLIANCE_RECORD_UPDATE),
+  updateComplianceRecordStatus
+);
 // Role and transition rules are enforced by ApprovalWorkflowService
 router.post('/:id/workflow', executeWorkflowAction);
 router.get(

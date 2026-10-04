@@ -82,6 +82,9 @@ export interface IComplianceRecord extends Document {
   // Assignment
   assignedUser?: Ref<unknown>; // → User
 
+  // Number printed on the licence / registration certificate
+  licenceNumber?: string;
+
   // Key Dates
   dueDate?: Date;
   submissionDate?: Date;
@@ -155,6 +158,8 @@ const complianceRecordSchema = new Schema<IComplianceRecord>(
     },
 
     assignedUser: { type: Schema.Types.ObjectId, ref: 'User', index: true },
+
+    licenceNumber: { type: String, trim: true },
 
     dueDate: { type: Date, index: true },
     submissionDate: { type: Date },

@@ -73,12 +73,17 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
     conditions.push({ expiryDate });
   }
 
-  // Text search on recordNumber, comments and notes
+  // Text search on recordNumber, licence number, comments and notes
   if (query.search?.trim()) {
     const escaped = query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const searchRegex = new RegExp(escaped, 'i');
     conditions.push({
-      $or: [{ recordNumber: searchRegex }, { comments: searchRegex }, { notes: searchRegex }],
+      $or: [
+        { recordNumber: searchRegex },
+        { licenceNumber: searchRegex },
+        { comments: searchRegex },
+        { notes: searchRegex },
+      ],
     });
   }
 
@@ -147,6 +152,8 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
     resubmitted: 0,
     expiring_soon: 0,
     expired: 0,
+    in_progress: 0,
+    not_applicable: 0,
     overdue: overdueCount,
   };
 
@@ -289,6 +296,10 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
   if (validated.assignedUser !== undefined) record.assignedUser = validated.assignedUser as any;
   if (validated.dueDate) record.dueDate = new Date(validated.dueDate);
   if (validated.expiryDate) record.expiryDate = new Date(validated.expiryDate);
+  if (validated.licenceNumber !== undefined) record.licenceNumber = validated.licenceNumber || undefined;
+  if (validated.issueDate !== undefined) {
+    record.issueDate = validated.issueDate ? new Date(validated.issueDate) : undefined;
+  }
   if (validated.submissionDate) record.submissionDate = new Date(validated.submissionDate);
   if (validated.approvalDate) record.approvalDate = new Date(validated.approvalDate);
   if (validated.comments !== undefined) record.comments = validated.comments;
@@ -312,12 +323,30 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
 // ── 5. Update Status Transition (Submit, Review, Approve, Reject, Expire) ──────
 export const updateComplianceRecordStatus = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { status, comments, decision } = updateComplianceStatusSchema.parse(req.body);
+  const { status, comments, decision, licenceNumber, issueDate, expiryDate } =
+    updateComplianceStatusSchema.parse(req.body);
 
   const record = await ComplianceRecord.findById(id);
   if (!record) throw ApiError.notFound('Compliance record not found.');
 
+  assertInScope(req, record);
+
   const previousStatus = record.status;
+  const statusChanged = status !== previousStatus;
+  const previousValue = {
+    recordNumber: record.recordNumber,
+    status: record.status,
+    dueDate: record.dueDate,
+    expiryDate: record.expiryDate,
+  };
+
+  // Licence details entered alongside the status
+  if (licenceNumber !== undefined) record.licenceNumber = licenceNumber || undefined;
+  if (issueDate !== undefined) record.issueDate = issueDate ? new Date(issueDate) : undefined;
+  if (expiryDate !== undefined) record.expiryDate = expiryDate ? new Date(expiryDate) : undefined;
+  if (record.issueDate && record.expiryDate && record.expiryDate < record.issueDate) {
+    throw ApiError.badRequest('The expiry date cannot be before the issue date.');
+  }
 
   // Strict rule: Approved record cannot be transitioned back
   if (
@@ -332,12 +361,16 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
   }
 
   record.status = status as ComplianceRecordStatus;
+  record.isApplicable = status !== 'not_applicable';
+  if (statusChanged) {
+    record.notApplicableReason = status === 'not_applicable' ? comments : undefined;
+  }
 
   // Timestamps
   if (status === 'submitted' && !record.submissionDate) {
     record.submissionDate = new Date();
   }
-  if (status === 'approved') {
+  if (status === 'approved' && statusChanged) {
     record.approvalDate = new Date();
     // If rule has renewal cycle, update nextRenewalDate
     const rule = await ComplianceRule.findById(record.rule || record.complianceRule);
@@ -352,7 +385,7 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
     record.comments = comments;
   }
 
-  // Append to approval audit trail
+  // Append to approval audit trail (only when the status actually moved)
   const approvalEntry = {
     _id: new Types.ObjectId(),
     level: (record.currentApprovalLevel || 0) + 1,
@@ -363,13 +396,19 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
     requestedAt: new Date(),
   };
 
-  record.approvals.push(approvalEntry as any);
-  record.currentApprovalLevel = approvalEntry.level;
+  if (statusChanged) {
+    record.approvals.push(approvalEntry as any);
+    record.currentApprovalLevel = approvalEntry.level;
+  }
   record.updatedBy = req.auth?.userId as any;
 
   await record.save();
 
-  await auditService.logStatusChanged(record, previousStatus, status, req);
+  if (statusChanged) {
+    await auditService.logStatusChanged(record, previousStatus, status, req);
+  } else {
+    await auditService.logComplianceUpdated(record, previousValue, req);
+  }
   await TaskAutomationService.syncRecordTasks(record._id);
 
   const updatedRecord = await ComplianceRecord.findById(id)
@@ -382,7 +421,9 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
   return ApiResponse.success(
     res,
     { record: updatedRecord },
-    `Compliance record status updated to ${status.replace('_', ' ').toUpperCase()}`
+    statusChanged
+      ? `Compliance record status updated to ${status.replace('_', ' ').toUpperCase()}`
+      : 'Licence details updated'
   );
 });
 

@@ -8,10 +8,10 @@ const optionalRef = objectId.or(z.literal('')).nullable().optional();
 export const locationAddressSchema = z.object({
   line1: z.string().trim().min(1, 'Address line 1 is required'),
   line2: z.string().trim().optional(),
-  city: z.string().trim().min(1, 'City is required'),
+  city: z.string().trim().optional(),
   district: z.string().trim().optional(),
   state: z.string().trim().min(1, 'State is required'),
-  pincode: z.string().trim().min(1, 'Pincode is required'),
+  pincode: z.string().trim().optional(),
   country: z.string().trim().default('India'),
 });
 
@@ -30,6 +30,15 @@ export const locationAgreementSchema = z
     message: 'Agreement end date cannot be before its start date',
   });
 
+export const locationCoEntitySchema = z.object({
+  entity: objectId,
+  openingDate: dateString.or(z.literal('')).nullable().optional(),
+});
+
+// Selects send '' when cleared
+const areaType = z.enum(['GP', 'NAC', 'MUN']).or(z.literal('')).nullable().optional();
+const operatingModel = z.enum(['CoCo', 'CoDo']).or(z.literal('')).nullable().optional();
+
 export const createLocationSchema = z.object({
   name: z.string().trim().min(1, 'Location name is required').max(200),
   code: z.string().trim().max(50).optional(),
@@ -42,6 +51,10 @@ export const createLocationSchema = z.object({
   contactPhone: z.string().trim().optional(),
   manager: optionalRef,
   openingDate: dateString.or(z.literal('')).nullable().optional(),
+  closingDate: dateString.or(z.literal('')).nullable().optional(),
+  areaType,
+  operatingModel,
+  coEntities: z.array(locationCoEntitySchema).optional(),
   description: z.string().trim().optional(),
   area: z.number().min(0).nullable().optional(),
   areaUnit: z.enum(['sqft', 'sqm']).optional(),
@@ -62,6 +75,7 @@ export const locationQuerySchema = z.object({
   state: z.string().trim().optional(),
   district: z.string().trim().optional(),
   city: z.string().trim().optional(),
+  areaType: z.enum(['GP', 'NAC', 'MUN']).optional(),
   status: z.enum(['active', 'inactive', 'archived']).optional(),
   attention: z.enum(['true', 'false']).optional(), // only locations with expired compliance
   sortBy: z.enum(['name', 'code', 'status', 'createdAt', 'updatedAt']).default('createdAt'),

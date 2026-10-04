@@ -1,0 +1,734 @@
+{
+  "takenAt": "2026-10-04T13:40:57.012Z",
+  "database": "test",
+  "locations": [
+    {
+      "_id": "6abfb4fd066013045a596025",
+      "name": "Mumbai Unit 1",
+      "code": "MUM-U-001",
+      "entity": "6abfb4fc066013045a596022",
+      "locationType": "6abfb4fc066013045a595ff7",
+      "address": {
+        "line1": "Unit 12, Ground Floor, Acme Mall",
+        "line2": "Andheri West",
+        "city": "Mumbai",
+        "state": "Maharashtra",
+        "pincode": "400058",
+        "country": "India"
+      },
+      "contactPerson": "Suresh Patel",
+      "contactEmail": "mumbai.unit1@ccpl.in",
+      "contactPhone": "+91 98200 11223",
+      "area": 4500,
+      "areaUnit": "sqft",
+      "operatingHours": "08:00 - 20:00",
+      "agreements": [
+        {
+          "agreementType": "lease",
+          "agreementNumber": "AGR-2024-001",
+          "startDate": "2024-01-01T00:00:00.000Z",
+          "endDate": "2027-12-31T00:00:00.000Z",
+          "parties": [
+            "CCPL Healthcare Pvt Ltd",
+            "Acme Mall Ltd"
+          ],
+          "_id": "6abfb4fd066013045a596026"
+        }
+      ],
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a59601a",
+      "createdAt": "2026-10-02T13:43:25.109Z",
+      "updatedAt": "2026-10-02T13:43:25.109Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfb4fd066013045a596029",
+      "name": "Pune Clinic 1",
+      "code": "PUN-C-001",
+      "entity": "6abfb4fc066013045a596022",
+      "locationType": "6abfb4fc066013045a595ff8",
+      "address": {
+        "line1": "Shop 4, Seasons Business Hub",
+        "line2": "Koregaon Park",
+        "city": "Pune",
+        "state": "Maharashtra",
+        "pincode": "411001",
+        "country": "India"
+      },
+      "contactPerson": "Anjali Deshmukh",
+      "contactEmail": "pune.clinic1@ccpl.in",
+      "contactPhone": "+91 98220 33445",
+      "area": 2200,
+      "areaUnit": "sqft",
+      "operatingHours": "09:00 - 21:00",
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a59601a",
+      "agreements": [],
+      "createdAt": "2026-10-02T13:43:25.233Z",
+      "updatedAt": "2026-10-02T13:43:25.233Z",
+      "__v": 0
+    }
+  ],
+  "compliancerules": [
+    {
+      "_id": "6abfb4fd066013045a596032",
+      "name": "Fire NOC Renewal",
+      "code": "FIRE-NOC-ANNUAL",
+      "description": "Annual renewal of Fire No Objection Certificate",
+      "category": "6abfb4fc066013045a595ffd",
+      "legalReference": "Fire Prevention and Life Safety Measures Act",
+      "applicableEntityTypes": [],
+      "applicableLocationTypes": [
+        "6abfb4fc066013045a595ff7",
+        "6abfb4fc066013045a595ff8",
+        "6abfb4fc066013045a595ff9"
+      ],
+      "applicableStates": [],
+      "frequency": "6abfb4fc066013045a596007",
+      "renewalFrequency": "ANNUALLY",
+      "renewalCycle": 365,
+      "reminderDaysBefore": [
+        90,
+        60,
+        30,
+        15,
+        7
+      ],
+      "requiredDocuments": [
+        {
+          "documentType": "6abfb0c209f8e1bf3382c140",
+          "label": "Fire NOC Certificate",
+          "isMandatory": true
+        }
+      ],
+      "mandatory": true,
+      "active": true,
+      "requiresApproval": false,
+      "approvalLevels": 1,
+      "priority": "high",
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a596013",
+      "applicability": {
+        "entityTypes": [],
+        "locationTypes": [
+          "6abfb4fc066013045a595ff7",
+          "6abfb4fc066013045a595ff8",
+          "6abfb4fc066013045a595ff9"
+        ],
+        "states": [],
+        "industries": []
+      },
+      "notificationRules": {
+        "reminderDays": [
+          90,
+          60,
+          30,
+          15,
+          7
+        ],
+        "notifyRoles": [
+          "location_manager",
+          "compliance_officer"
+        ],
+        "channels": [
+          "email",
+          "in_app"
+        ]
+      },
+      "escalationRules": {
+        "escalateAfterDays": 7,
+        "escalateToRole": "entity_admin",
+        "autoTaskCreation": true
+      },
+      "createdAt": "2026-10-02T13:43:25.486Z",
+      "updatedAt": "2026-10-02T13:43:25.486Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfb4fd066013045a596030",
+      "name": "FSSAI Food Safety Licence Renewal",
+      "code": "FSSAI-ANNUAL",
+      "description": "Mandatory annual renewal of Food Safety licence",
+      "category": "6abfb4fc066013045a595ffc",
+      "legalReference": "Food Safety and Standards Act, 2006 — Section 31",
+      "applicableEntityTypes": [
+        "6abfb4fc066013045a595ff2",
+        "6abfb4fc066013045a595ff3"
+      ],
+      "applicableLocationTypes": [
+        "6abfb4fc066013045a595ff7",
+        "6abfb4fc066013045a595ff8"
+      ],
+      "applicableStates": [],
+      "frequency": "6abfb4fc066013045a596007",
+      "renewalFrequency": "ANNUALLY",
+      "renewalCycle": 365,
+      "reminderDaysBefore": [
+        90,
+        60,
+        30,
+        15,
+        7
+      ],
+      "requiredDocuments": [
+        {
+          "documentType": "6abfb0c209f8e1bf3382c13f",
+          "label": "FSSAI Licence Certificate",
+          "isMandatory": true
+        },
+        {
+          "documentType": "6abfb4fc066013045a59600a",
+          "label": "Premises KYC Documents",
+          "isMandatory": true
+        }
+      ],
+      "mandatory": true,
+      "active": true,
+      "requiresApproval": true,
+      "approvalLevels": 2,
+      "priority": "high",
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a596013",
+      "applicability": {
+        "entityTypes": [
+          "6abfb4fc066013045a595ff2",
+          "6abfb4fc066013045a595ff3"
+        ],
+        "locationTypes": [
+          "6abfb4fc066013045a595ff7",
+          "6abfb4fc066013045a595ff8"
+        ],
+        "states": [],
+        "industries": []
+      },
+      "notificationRules": {
+        "reminderDays": [
+          90,
+          60,
+          30,
+          15,
+          7
+        ],
+        "notifyRoles": [
+          "location_manager",
+          "compliance_officer"
+        ],
+        "channels": [
+          "email",
+          "in_app"
+        ]
+      },
+      "escalationRules": {
+        "escalateAfterDays": 7,
+        "escalateToRole": "entity_admin",
+        "autoTaskCreation": true
+      },
+      "createdAt": "2026-10-02T13:43:25.422Z",
+      "updatedAt": "2026-10-02T13:43:25.422Z",
+      "__v": 0
+    }
+  ],
+  "compliancerecords": [
+    {
+      "_id": "6abfb4fd066013045a596034",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "rule": "6abfb4fd066013045a596030",
+      "complianceRule": "6abfb4fd066013045a596030",
+      "recordNumber": "CR-2026-00001",
+      "status": "expired",
+      "expiryDate": "2026-03-31T00:00:00.000Z",
+      "issueDate": "2025-04-01T00:00:00.000Z",
+      "nextRenewalDate": "2026-01-01T00:00:00.000Z",
+      "currentVersion": 1,
+      "isApplicable": true,
+      "documents": [
+        "6abfb4fd066013045a59602b",
+        "6ac00217361e3a232a5531e9"
+      ],
+      "approvals": [
+        {
+          "level": 1,
+          "approver": "6abfb4fc066013045a59601e",
+          "decision": "approved",
+          "comments": "Documents verified and in order.",
+          "decidedAt": "2025-04-05T00:00:00.000Z",
+          "requestedAt": "2025-04-02T00:00:00.000Z",
+          "_id": "6abfb4fd066013045a596035"
+        }
+      ],
+      "currentApprovalLevel": 1,
+      "remindersSent": [],
+      "createdBy": "6abfb4fc066013045a59601e",
+      "approvalDate": "2026-10-02T13:43:25.552Z",
+      "createdAt": "2026-10-02T13:43:25.553Z",
+      "updatedAt": "2026-10-02T19:12:25.178Z",
+      "__v": 0,
+      "updatedBy": "6abfb4fc066013045a596017"
+    },
+    {
+      "_id": "6abfb4fd066013045a596037",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "rule": "6abfb4fd066013045a596032",
+      "complianceRule": "6abfb4fd066013045a596032",
+      "recordNumber": "CR-2026-00002",
+      "status": "pending",
+      "expiryDate": "2026-06-30T00:00:00.000Z",
+      "nextRenewalDate": "2026-04-01T00:00:00.000Z",
+      "currentVersion": 1,
+      "isApplicable": true,
+      "documents": [],
+      "currentApprovalLevel": 0,
+      "remindersSent": [],
+      "createdBy": "6abfb4fc066013045a59601e",
+      "approvals": [],
+      "createdAt": "2026-10-02T13:43:25.620Z",
+      "updatedAt": "2026-10-02T13:43:25.620Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfb4fd066013045a596039",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596029",
+      "rule": "6abfb4fd066013045a596030",
+      "complianceRule": "6abfb4fd066013045a596030",
+      "recordNumber": "CR-2026-00003",
+      "status": "expired",
+      "expiryDate": "2025-12-31T00:00:00.000Z",
+      "nextRenewalDate": "2025-10-01T00:00:00.000Z",
+      "currentVersion": 1,
+      "isApplicable": true,
+      "documents": [],
+      "currentApprovalLevel": 0,
+      "remindersSent": [],
+      "createdBy": "6abfb4fc066013045a59601e",
+      "approvals": [],
+      "createdAt": "2026-10-02T13:43:25.682Z",
+      "updatedAt": "2026-10-02T13:43:25.682Z",
+      "__v": 0
+    },
+    {
+      "_id": "6ac241b8fb5e132762e2388b",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596029",
+      "rule": "6abfb4fd066013045a596032",
+      "complianceRule": "6abfb4fd066013045a596032",
+      "status": "pending",
+      "dueDate": "2027-10-04T12:08:24.801Z",
+      "currentVersion": 1,
+      "isApplicable": true,
+      "documents": [],
+      "currentApprovalLevel": 0,
+      "remindersSent": [],
+      "createdBy": "6abfb4fc066013045a596013",
+      "updatedBy": "6abfb4fc066013045a596013",
+      "approvals": [],
+      "recordNumber": "CR-2026-0004-3369",
+      "createdAt": "2026-10-04T12:08:24.857Z",
+      "updatedAt": "2026-10-04T12:08:24.857Z",
+      "__v": 0
+    }
+  ],
+  "entities": [
+    {
+      "_id": "6abfcd59696f91feec528ed8",
+      "name": "Papu",
+      "code": "HAHWH",
+      "entityType": "6abfb4fc066013045a595ff2",
+      "registrationNumber": "",
+      "address": {
+        "line1": "Pqpap",
+        "city": "Mumbqi",
+        "district": "Pune",
+        "state": "Maharashtra",
+        "pincode": "755003",
+        "country": "India"
+      },
+      "contactEmail": "prasannajitjenaa00@gmail.com",
+      "contactPhone": "+917790052789",
+      "contactPerson": "PRASANNAJIT JENA",
+      "description": "",
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a596017",
+      "createdAt": "2026-10-02T15:27:21.797Z",
+      "updatedAt": "2026-10-02T15:27:21.797Z",
+      "__v": 0
+    }
+  ],
+  "tasks": [
+    {
+      "_id": "6abfb4fd066013045a596043",
+      "title": "Renew FSSAI Licence for Mumbai Unit 1",
+      "description": "Annual FSSAI licence renewal due by March 31, 2026. Upload certificate.",
+      "taskType": "renewal",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "complianceRecord": "6abfb4fd066013045a596034",
+      "licence": "6abfb4fd066013045a59603b",
+      "assignedTo": "6abfb4fc066013045a59601e",
+      "assignedBy": "6abfb4fc066013045a59601a",
+      "dueDate": "2026-01-31T00:00:00.000Z",
+      "priority": "high",
+      "status": "in_progress",
+      "isEscalated": false,
+      "isAutoGenerated": true,
+      "autoGenSource": "renewal_job",
+      "tags": [],
+      "createdBy": "6abfb4fc066013045a59601a",
+      "assignedAt": "2026-10-02T13:43:25.997Z",
+      "comments": [],
+      "createdAt": "2026-10-02T13:43:25.998Z",
+      "updatedAt": "2026-10-02T19:10:28.703Z",
+      "__v": 0,
+      "startedAt": "2026-10-02T19:10:28.702Z",
+      "updatedBy": "6abfb4fc066013045a59601e"
+    },
+    {
+      "_id": "6abfb4fe066013045a596045",
+      "title": "Upload Fire NOC Certificate for Mumbai Unit 1",
+      "description": "Fire NOC expires June 30. Upload renewed certificate.",
+      "taskType": "document_upload",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "complianceRecord": "6abfb4fd066013045a596037",
+      "assignedTo": "6abfb4fc066013045a59601e",
+      "assignedBy": "6abfb4fc066013045a59601a",
+      "dueDate": "2026-05-31T00:00:00.000Z",
+      "priority": "medium",
+      "status": "open",
+      "isEscalated": false,
+      "isAutoGenerated": false,
+      "tags": [],
+      "createdBy": "6abfb4fc066013045a59601a",
+      "assignedAt": "2026-10-02T13:43:26.056Z",
+      "comments": [],
+      "createdAt": "2026-10-02T13:43:26.057Z",
+      "updatedAt": "2026-10-02T13:43:26.057Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfcaae696f91feec528a9a",
+      "title": "test",
+      "description": "test",
+      "taskType": "manual",
+      "entity": "6abfb4fc066013045a596022",
+      "assignedTo": "6abfb4fc066013045a59601c",
+      "dueDate": "2026-10-15T00:00:00.000Z",
+      "priority": "high",
+      "status": "open",
+      "isEscalated": false,
+      "isAutoGenerated": false,
+      "tags": [],
+      "createdBy": "6abfb4fc066013045a596013",
+      "assignedAt": "2026-10-02T15:15:58.280Z",
+      "comments": [],
+      "createdAt": "2026-10-02T15:15:58.281Z",
+      "updatedAt": "2026-10-02T15:15:58.281Z",
+      "__v": 0
+    },
+    {
+      "_id": "6ac00219361e3a232a5531fc",
+      "title": "URGENT: Compliance Expired - FSSAI Food Safety Licence Renewal",
+      "description": "Statutory compliance obligation CR-2026-00001 for Mumbai Unit 1 expired on 3/31/2026. Immediate renewal and statutory upload required.",
+      "taskType": "renewal",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "complianceRecord": "6abfb4fd066013045a596034",
+      "assignedTo": "6abfb4fc066013045a596013",
+      "dueDate": "2026-10-02T19:12:25.659Z",
+      "priority": "critical",
+      "status": "open",
+      "isEscalated": false,
+      "isAutoGenerated": true,
+      "autoGenSource": "expired_checker",
+      "autoGenKey": "expired_6abfb4fd066013045a596034_2026-03-31",
+      "tags": [],
+      "assignedAt": "2026-10-02T19:12:25.893Z",
+      "comments": [],
+      "createdAt": "2026-10-02T19:12:25.894Z",
+      "updatedAt": "2026-10-02T19:12:25.894Z",
+      "__v": 0
+    }
+  ],
+  "licences": [
+    {
+      "_id": "6abfb4fd066013045a59603b",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "licenceType": "6abfb0c209f8e1bf3382c144",
+      "licenceNumber": "FSSAI-2025-MH-0012345",
+      "issuingAuthority": "FSSAI Central Authority",
+      "issuingState": "Maharashtra",
+      "issueDate": "2025-04-01T00:00:00.000Z",
+      "expiryDate": "2026-03-31T00:00:00.000Z",
+      "nextRenewalDate": "2026-01-01T00:00:00.000Z",
+      "document": "6abfb4fd066013045a59602b",
+      "reminderDaysBefore": [
+        90,
+        60,
+        30,
+        7
+      ],
+      "remindersSent": [],
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a59601e",
+      "renewalHistory": [],
+      "createdAt": "2026-10-02T13:43:25.742Z",
+      "updatedAt": "2026-10-02T13:43:25.742Z",
+      "__v": 0
+    }
+  ],
+  "approvals": [
+    {
+      "_id": "6abfb4fd066013045a59603f",
+      "complianceRecord": "6abfb4fd066013045a596034",
+      "action": "Submit",
+      "performedBy": "6abfb4fc066013045a59601e",
+      "performedAt": "2025-04-02T00:00:00.000Z",
+      "previousStatus": "pending",
+      "newStatus": "submitted",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "createdAt": "2026-10-02T13:43:25.862Z",
+      "updatedAt": "2026-10-02T13:43:25.862Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfb4fd066013045a596041",
+      "complianceRecord": "6abfb4fd066013045a596034",
+      "action": "Approve",
+      "performedBy": "6abfb4fc066013045a59601a",
+      "performedAt": "2025-04-05T00:00:00.000Z",
+      "comments": "All compliance certificates verified against MCA & state records.",
+      "previousStatus": "submitted",
+      "newStatus": "approved",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "createdAt": "2026-10-02T13:43:25.929Z",
+      "updatedAt": "2026-10-02T13:43:25.929Z",
+      "__v": 0
+    }
+  ],
+  "notifications": [
+    {
+      "_id": "6abfb4fe066013045a596047",
+      "recipient": "6abfb4fc066013045a59601e",
+      "type": "task_assigned",
+      "title": "New Task Assigned: Renew FSSAI Licence",
+      "body": "You have been assigned to renew FSSAI Licence for Mumbai Unit 1 before Jan 31, 2026.",
+      "relatedTask": "6abfb4fd066013045a596043",
+      "entity": "6abfb4fc066013045a596022",
+      "channels": [
+        {
+          "channel": "in_app",
+          "status": "delivered",
+          "deliveredAt": "2026-10-02T13:43:26.121Z"
+        },
+        {
+          "channel": "email",
+          "status": "sent",
+          "sentAt": "2026-10-02T13:43:26.121Z"
+        }
+      ],
+      "isRead": false,
+      "createdAt": "2026-10-02T13:43:26.123Z",
+      "updatedAt": "2026-10-02T13:43:26.123Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfb4fe066013045a596049",
+      "recipient": "6abfb4fc066013045a59601e",
+      "type": "compliance_expired",
+      "title": "Compliance Expired: FSSAI-ANNUAL for Pune Clinic 1",
+      "body": "The annual FSSAI compliance record for Pune Clinic 1 expired on Dec 31, 2025. Immediate action required.",
+      "relatedComplianceRecord": "6abfb4fd066013045a596039",
+      "entity": "6abfb4fc066013045a596022",
+      "channels": [
+        {
+          "channel": "in_app",
+          "status": "delivered",
+          "deliveredAt": "2026-10-02T13:43:26.176Z"
+        },
+        {
+          "channel": "email",
+          "status": "sent",
+          "sentAt": "2026-10-02T13:43:26.176Z"
+        }
+      ],
+      "isRead": false,
+      "createdAt": "2026-10-02T13:43:26.177Z",
+      "updatedAt": "2026-10-02T13:43:26.177Z",
+      "__v": 0
+    },
+    {
+      "_id": "6abfcaaf696f91feec528aa1",
+      "recipient": "6abfb4fc066013045a59601c",
+      "type": "task_assigned",
+      "title": "New Task Assigned: test",
+      "body": "test",
+      "actionUrl": "/tasks?task=6abfcaae696f91feec528a9a",
+      "relatedTask": "6abfcaae696f91feec528a9a",
+      "entity": "6abfb4fc066013045a596022",
+      "channels": [
+        {
+          "channel": "in_app",
+          "status": "pending",
+          "sentAt": "2026-10-02T15:15:59.222Z"
+        },
+        {
+          "channel": "email",
+          "status": "sent",
+          "sentAt": "2026-10-02T15:15:59.468Z"
+        }
+      ],
+      "isRead": false,
+      "createdAt": "2026-10-02T15:15:59.225Z",
+      "updatedAt": "2026-10-02T15:15:59.469Z",
+      "__v": 0
+    },
+    {
+      "_id": "6ac0021a361e3a232a5531ff",
+      "recipient": "6abfb4fc066013045a596013",
+      "type": "compliance_expired",
+      "title": "URGENT: Compliance Expired (CR-2026-00001)",
+      "body": "Statutory compliance obligation CR-2026-00001 for Mumbai Unit 1 expired on 3/31/2026. Immediate renewal and statutory upload required.",
+      "actionUrl": "/compliance/records/6abfb4fd066013045a596034",
+      "relatedTask": "6ac00219361e3a232a5531fc",
+      "relatedComplianceRecord": "6abfb4fd066013045a596034",
+      "entity": "6abfb4fc066013045a596022",
+      "channels": [
+        {
+          "channel": "in_app",
+          "status": "pending",
+          "sentAt": "2026-10-02T19:12:26.518Z"
+        },
+        {
+          "channel": "email",
+          "status": "sent",
+          "sentAt": "2026-10-02T19:12:26.759Z"
+        }
+      ],
+      "isRead": true,
+      "createdAt": "2026-10-02T19:12:26.519Z",
+      "updatedAt": "2026-10-02T19:15:55.628Z",
+      "__v": 0,
+      "readAt": "2026-10-02T19:15:55.627Z"
+    }
+  ],
+  "documentversions": [
+    {
+      "_id": "6abfb4fd066013045a59602e",
+      "document": "6abfb4fd066013045a59602b",
+      "version": 1,
+      "fileUrl": "https://storage.cms.local/docs/fssai-cert-v1.pdf",
+      "fileName": "fssai-cert-mumbai-2025.pdf",
+      "fileSize": 1048576,
+      "mimeType": "application/pdf",
+      "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "uploadedBy": "6abfb4fc066013045a59601e",
+      "uploadedAt": "2025-04-02T00:00:00.000Z",
+      "status": "active",
+      "createdAt": "2026-10-02T13:43:25.359Z",
+      "updatedAt": "2026-10-02T13:43:25.359Z",
+      "__v": 0
+    }
+  ],
+  "documents": [
+    {
+      "_id": "6abfb4fd066013045a59602b",
+      "title": "FSSAI Central Licence Certificate",
+      "documentType": "6abfb0c209f8e1bf3382c13f",
+      "description": "Food Safety and Standards Authority Certificate for Mumbai Unit",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "relatedTo": {
+        "model": "Location",
+        "id": "6abfb4fd066013045a596025"
+      },
+      "version": 1,
+      "currentVersion": 1,
+      "fileUrl": "https://storage.cms.local/docs/fssai-cert-v1.pdf",
+      "fileName": "fssai-cert-mumbai-2025.pdf",
+      "fileSize": 1048576,
+      "mimeType": "application/pdf",
+      "latestVersionUrl": "https://storage.cms.local/docs/fssai-cert-v1.pdf",
+      "uploadedBy": "6abfb4fc066013045a59601e",
+      "uploadedAt": "2025-04-02T00:00:00.000Z",
+      "expiryDate": "2026-03-31T00:00:00.000Z",
+      "issueDate": "2025-04-01T00:00:00.000Z",
+      "verificationStatus": "pending",
+      "versions": [
+        {
+          "version": 1,
+          "fileUrl": "https://storage.cms.local/docs/fssai-cert-v1.pdf",
+          "fileName": "fssai-cert-mumbai-2025.pdf",
+          "fileSize": 1048576,
+          "mimeType": "application/pdf",
+          "checksum": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "uploadedBy": "6abfb4fc066013045a59601e",
+          "uploadedAt": "2025-04-02T00:00:00.000Z",
+          "status": "active",
+          "_id": "6abfb4fd066013045a59602c"
+        }
+      ],
+      "tags": [
+        "fssai",
+        "licence",
+        "mumbai"
+      ],
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a59601e",
+      "name": "FSSAI Central Licence Certificate",
+      "createdAt": "2026-10-02T13:43:25.289Z",
+      "updatedAt": "2026-10-02T13:43:25.289Z",
+      "__v": 0
+    },
+    {
+      "_id": "6ac00217361e3a232a5531e9",
+      "name": "UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C",
+      "title": "UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C",
+      "type": "LICENCE_CERT",
+      "documentType": "6abfb0c209f8e1bf3382c13f",
+      "entity": "6abfb4fc066013045a596022",
+      "location": "6abfb4fd066013045a596025",
+      "complianceRecord": "6abfb4fd066013045a596034",
+      "relatedTo": {
+        "model": "ComplianceRecord",
+        "id": "6abfb4fd066013045a596034"
+      },
+      "version": 1,
+      "currentVersion": 1,
+      "fileUrl": "/uploads/compliance-documents/UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C-1790968342835-710153856.jpg",
+      "fileName": "UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C.jpg",
+      "fileSize": 163808,
+      "mimeType": "image/jpeg",
+      "latestVersionUrl": "/uploads/compliance-documents/UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C-1790968342835-710153856.jpg",
+      "uploadedBy": "6abfb4fc066013045a596017",
+      "uploadedAt": "2026-10-02T19:12:23.254Z",
+      "expiryDate": "2026-10-16T00:00:00.000Z",
+      "verificationStatus": "pending",
+      "versions": [
+        {
+          "version": 1,
+          "fileUrl": "/uploads/compliance-documents/UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C-1790968342835-710153856.jpg",
+          "fileName": "UKdv4XmDBI0TyECxA6TqTGhoekpOFaF9Lvn-GP9JfN4Sq6goFMo2FE8pZFi96KgfVnlzfJNNpsdpGL2QGR7TtpSDx5AnTH4BTh-dIqCNOD01WUtlgCBahVx4APlr_0LtlFruwIpNXqFH2SmiLkXifQCXJkERGw5c8ZCqOxGfWddR9xCuZ1rxbYVM7WyPcL6C.jpg",
+          "fileSize": 163808,
+          "mimeType": "image/jpeg",
+          "uploadedBy": "6abfb4fc066013045a596017",
+          "uploadedAt": "2026-10-02T19:12:23.254Z",
+          "notes": "Initial document upload",
+          "status": "active",
+          "_id": "6ac00217361e3a232a5531ea"
+        }
+      ],
+      "tags": [],
+      "status": "active",
+      "createdBy": "6abfb4fc066013045a596017",
+      "updatedBy": "6abfb4fc066013045a596017",
+      "createdAt": "2026-10-02T19:12:23.269Z",
+      "updatedAt": "2026-10-02T19:12:23.269Z",
+      "__v": 0
+    }
+  ]
+}

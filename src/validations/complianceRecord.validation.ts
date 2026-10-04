@@ -4,6 +4,10 @@
 
 import { z } from 'zod';
 
+const dateInput = z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/));
+// Forms send '' or null to clear a date
+const clearableDate = dateInput.or(z.literal('')).nullable().optional();
+
 export const createComplianceRecordSchema = z.object({
   entity: z.string().min(1, 'Entity ID is required'),
   location: z.string().min(1, 'Location ID is required'),
@@ -16,6 +20,8 @@ export const createComplianceRecordSchema = z.object({
 });
 
 export const updateComplianceRecordSchema = createComplianceRecordSchema.partial().extend({
+  licenceNumber: z.string().trim().max(100).optional(),
+  issueDate: clearableDate,
   submissionDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
   approvalDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
 });
@@ -31,8 +37,14 @@ export const updateComplianceStatusSchema = z.object({
     'resubmitted',
     'expiring_soon',
     'expired',
+    'in_progress',
+    'not_applicable',
   ]),
   comments: z.string().optional(),
+  // Licence details can be saved together with the status
+  licenceNumber: z.string().trim().max(100).optional(),
+  issueDate: clearableDate,
+  expiryDate: clearableDate,
   decision: z.enum(['pending', 'approved', 'rejected', 'escalated']).optional(),
 });
 
