@@ -56,6 +56,17 @@ export interface OperationsDashboardData {
   topDistricts: Array<{ district: string; state: string; units: number }>;
   unitTypes: Array<{ code: string; label: string; units: number }>;
   areaTypes: Array<{ areaType: string; units: number }>;
+  /** Share of each licence approved in each state; a missing cell means it applies nowhere there */
+  licenceGrid: {
+    licences: Array<{ ruleId: string; code: string; name: string }>;
+    rows: Array<{ state: string; cells: Record<string, { approved: number; total: number }> }>;
+  };
+  /** One row per company: the units it operates at and where its licences stand */
+  byCompany: Array<{ entityId: string; code: string; name: string; units: number } & LicenceCounts>;
+  /** Units opened in each calendar year (closed ones included) */
+  openingsByYear: Array<{ year: string; opened: number }>;
+  /** Licence status of open and planned units, grouped by the year the unit opened */
+  byOpeningYear: Array<{ year: string; units: number } & LicenceCounts>;
   /** Units opened per month, with the running total */
   openingsTrend: Array<{ month: string; opened: number; total: number }>;
   expiring: {
@@ -122,6 +133,10 @@ const licenceBucketExpression = (now: Date) => ({
   },
 });
 
+const NO_OPENING_DATE = 'No date';
+const openingYearOf = (openingDate?: Date | null): string =>
+  openingDate ? String(new Date(openingDate).getFullYear()) : NO_OPENING_DATE;
+
 const unitBucket = (
   location: { status: string; isUpcoming?: boolean; openingDate?: Date | null },
   now: Date
@@ -154,7 +169,7 @@ export class OperationsDashboardService {
 
     const [locations, scopedStates, entities] = await Promise.all([
       Location.find({ $and: locationConditions })
-        .select('name code status isUpcoming openingDate areaType locationType address.state address.district')
+        .select('name code status isUpcoming openingDate areaType locationType entity coEntities.entity address.state address.district')
         .populate('locationType', 'code label')
         .lean(),
       Location.find(scopedLocationFilter).distinct('address.state'),
@@ -216,6 +231,22 @@ export class OperationsDashboardService {
       const key = `${opened.getFullYear()}-${String(opened.getMonth() + 1).padStart(2, '0')}`;
       openedByMonth.set(key, (openedByMonth.get(key) || 0) + 1);
     }
+    const openedByYear = new Map<string, number>();
+    const companyUnits = new Map<string, number>();
+    const liveUnitsByOpeningYear = new Map<string, number>();
+    for (const loc of locations) {
+      const opened = loc.openingDate ? new Date(loc.openingDate) : null;
+      if (opened && opened <= now) {
+        const year = String(opened.getFullYear());
+        openedByYear.set(year, (openedByYear.get(year) || 0) + 1);
+      }
+      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
+      const cohort = openingYearOf(loc.openingDate);
+      liveUnitsByOpeningYear.set(cohort, (liveUnitsByOpeningYear.get(cohort) || 0) + 1);
+      const operators = new Set([String(loc.entity), ...(loc.coEntities || []).map((co) => String(co.entity))]);
+      operators.forEach((id) => companyUnits.set(id, (companyUnits.get(id) || 0) + 1));
+    }
+
     const openingsTrend: OperationsDashboardData['openingsTrend'] = [];
     const monthKeys = Array.from(openedByMonth.keys()).sort();
     if (monthKeys.length > 0) {
@@ -250,15 +281,17 @@ export class OperationsDashboardService {
       ComplianceRecord.aggregate<{
         byLocation: Array<{ _id: { location: Types.ObjectId; bucket: LicenceBucket | 'notApplicable' }; count: number }>;
         byRule: Array<{ _id: { rule: Types.ObjectId; bucket: LicenceBucket | 'notApplicable' }; count: number }>;
+        byEntity: Array<{ _id: { entity: Types.ObjectId; bucket: LicenceBucket | 'notApplicable' }; count: number }>;
         expiryTotals: Array<{ withExpiryDate: number; next30: number; next60: number; next90: number }>;
         expiryItems: Array<{ _id: Types.ObjectId; location: Types.ObjectId; rule: Types.ObjectId; expiryDate: Date }>;
       }>([
         { $match: { $and: recordConditions } },
-        { $project: { location: 1, rule: 1, expiryDate: 1, bucket: licenceBucketExpression(now) } },
+        { $project: { location: 1, rule: 1, entity: 1, expiryDate: 1, bucket: licenceBucketExpression(now) } },
         {
           $facet: {
             byLocation: [{ $group: { _id: { location: '$location', bucket: '$bucket' }, count: { $sum: 1 } } }],
             byRule: [{ $group: { _id: { rule: '$rule', bucket: '$bucket' }, count: { $sum: 1 } } }],
+            byEntity: [{ $group: { _id: { entity: '$entity', bucket: '$bucket' }, count: { $sum: 1 } } }],
             expiryTotals: [
               { $match: { bucket: 'approved', expiryDate: { $type: 'date' } } },
               {
@@ -282,6 +315,48 @@ export class OperationsDashboardService {
       ]),
       ComplianceRule.find().select('name code').lean(),
     ]);
+
+    // State × licence: each state's units are matched as a set, so the database
+    // returns one small row per state, licence and status
+    const liveIdsByState = new Map<string, Types.ObjectId[]>();
+    for (const loc of locations) {
+      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
+      const state = loc.address?.state?.trim() || 'Unknown';
+      if (!liveIdsByState.has(state)) liveIdsByState.set(state, []);
+      liveIdsByState.get(state)!.push(loc._id as Types.ObjectId);
+    }
+    const stateRuleCounts = await Promise.all(
+      Array.from(liveIdsByState.entries()).map(async ([state, ids]) => ({
+        state,
+        rows: await ComplianceRecord.aggregate<{ _id: { rule: Types.ObjectId; bucket: string }; count: number }>([
+          { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
+          { $project: { rule: 1, bucket: licenceBucketExpression(now) } },
+          { $match: { bucket: { $ne: 'notApplicable' } } },
+          { $group: { _id: { rule: '$rule', bucket: '$bucket' }, count: { $sum: 1 } } },
+        ]),
+      }))
+    );
+
+    // Licence status by the year the unit opened, matched the same way
+    const liveIdsByOpeningYear = new Map<string, Types.ObjectId[]>();
+    for (const loc of locations) {
+      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
+      const cohort = openingYearOf(loc.openingDate);
+      if (!liveIdsByOpeningYear.has(cohort)) liveIdsByOpeningYear.set(cohort, []);
+      liveIdsByOpeningYear.get(cohort)!.push(loc._id as Types.ObjectId);
+    }
+    const openingYearCounts = await Promise.all(
+      Array.from(liveIdsByOpeningYear.entries()).map(async ([year, ids]) => ({
+        year,
+        rows: await ComplianceRecord.aggregate<{ _id: string; count: number }>([
+          { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
+          { $project: { bucket: licenceBucketExpression(now) } },
+          { $match: { bucket: { $ne: 'notApplicable' } } },
+          { $group: { _id: '$bucket', count: { $sum: 1 } } },
+        ]),
+      }))
+    );
+
     const ruleById = new Map(rules.map((rule) => [String(rule._id), rule]));
 
     const totals = emptyLicences();
@@ -413,6 +488,59 @@ export class OperationsDashboardService {
       areaTypes: Array.from(areaUnits.entries())
         .map(([areaType, count]) => ({ areaType: AREA_TYPE_LABELS[areaType] || areaType, units: count }))
         .sort((a, b) => b.units - a.units),
+      licenceGrid: {
+        licences: Array.from(ruleLicences.entries())
+          .map(([ruleId, counts]) => ({ ruleId, total: withTotals(counts).total }))
+          .sort((a, b) => b.total - a.total)
+          .map(({ ruleId }) => ({
+            ruleId,
+            code: ruleById.get(ruleId)?.code || '',
+            name: ruleById.get(ruleId)?.name || 'Licence',
+          })),
+        rows: stateRuleCounts
+          .map(({ state, rows }) => {
+            const cells: Record<string, { approved: number; total: number }> = {};
+            for (const row of rows) {
+              const ruleId = String(row._id.rule);
+              if (!cells[ruleId]) cells[ruleId] = { approved: 0, total: 0 };
+              cells[ruleId].total += row.count;
+              if (row._id.bucket === 'approved') cells[ruleId].approved += row.count;
+            }
+            return { state, cells };
+          })
+          .filter((row) => Object.keys(row.cells).length > 0)
+          .sort((a, b) => (stateUnits.get(b.state)?.total || 0) - (stateUnits.get(a.state)?.total || 0)),
+      },
+      byCompany: entities
+        .map((entity) => {
+          const counts = emptyLicences();
+          for (const row of summary?.byEntity || []) {
+            if (String(row._id.entity) === String(entity._id) && row._id.bucket !== 'notApplicable') {
+              counts[row._id.bucket] += row.count;
+            }
+          }
+          return {
+            entityId: String(entity._id),
+            code: entity.code,
+            name: entity.name,
+            units: companyUnits.get(String(entity._id)) || 0,
+            ...withTotals(counts),
+          };
+        })
+        .filter((company) => company.units > 0 || company.total > 0)
+        .filter((company) => !filters.entity || company.entityId === filters.entity),
+      openingsByYear: Array.from(openedByYear.entries())
+        .map(([year, opened]) => ({ year, opened }))
+        .sort((a, b) => a.year.localeCompare(b.year)),
+      byOpeningYear: openingYearCounts
+        .map(({ year, rows }) => {
+          const counts = emptyLicences();
+          for (const row of rows) counts[row._id as LicenceBucket] += row.count;
+          return { year, units: liveUnitsByOpeningYear.get(year) || 0, ...withTotals(counts) };
+        })
+        .filter((row) => row.total > 0)
+        // Years in order, units without an opening date last
+        .sort((a, b) => Number(a.year === NO_OPENING_DATE) - Number(b.year === NO_OPENING_DATE) || a.year.localeCompare(b.year)),
       openingsTrend,
       expiring,
       attention: attention.slice(0, 8),
