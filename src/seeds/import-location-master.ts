@@ -189,6 +189,7 @@ interface ParsedLocation {
   coEntity?: { entity: Company; openingDate?: Date };
   typeKey: string;
   openingDate?: Date;
+  isUpcoming: boolean;
   address: { line1: string; district: string; state: string; pincode?: string };
   areaType?: 'GP' | 'NAC' | 'MUN';
   status: 'active' | 'inactive';
@@ -236,6 +237,11 @@ const parseSheet = (sheet: ExcelJS.Worksheet): ParseResult => {
     const parts = typeKey.split('+');
     const openingCcpl = parseDate(row.getCell(COL.openingCcpl));
     const openingCppl = parseDate(row.getCell(COL.openingCppl));
+    // "TBO" (to be opened) in the opening column of whichever company opens first
+    const openingText = [COL.openingCcpl, COL.openingCppl]
+      .map((col) => text(row.getCell(col)).toUpperCase())
+      .find((value) => value && !/^[-_]+$/.test(value));
+    const isUpcoming = openingText === 'TBO';
 
     // A pharmacy or warehouse inside a clinic is run by CPPL
     const coEntity =
@@ -288,6 +294,7 @@ const parseSheet = (sheet: ExcelJS.Worksheet): ParseResult => {
       coEntity,
       typeKey,
       openingDate: owner === 'CPPL' ? openingCppl || openingCcpl : openingCcpl,
+      isUpcoming,
       address: {
         line1,
         district: titleCase(text(row.getCell(COL.district))),
@@ -444,6 +451,7 @@ const importToDatabase = async (parsed: ParseResult) => {
       coEntities: loc.coEntity ? [{ entity: entityIds[loc.coEntity.entity], openingDate: loc.coEntity.openingDate }] : [],
       address: { ...loc.address, country: 'India' },
       openingDate: loc.openingDate,
+      isUpcoming: loc.isUpcoming,
       areaType: loc.areaType,
       status: loc.status,
       description: `Imported from ${SOURCE_TAG}, Sl. No. ${loc.slNo || '—'}, sheet code "${loc.sheetCode}".`,

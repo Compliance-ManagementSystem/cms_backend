@@ -97,6 +97,8 @@ export interface ILocation extends Document {
   contactPhone?: string;
   manager?: Ref<unknown>;     // → User (unit/location manager)
   openingDate?: Date;
+  /** Planned unit that has not opened yet ("TBO"); an opening date on or before today overrides it */
+  isUpcoming?: boolean;
   closingDate?: Date;
   areaType?: AreaType;        // Local body: Gram Panchayat / NAC / Municipality
   operatingModel?: OperatingModel; // Company-owned (CoCo) or dealer-operated (CoDo)
@@ -143,6 +145,7 @@ const locationSchema = new Schema<ILocation>(
     contactPhone:   { type: String, trim: true },
     manager:        { type: Schema.Types.ObjectId, ref: 'User' },
     openingDate:    { type: Date },
+    isUpcoming:     { type: Boolean, default: false },
     closingDate:    { type: Date },
     areaType:       { type: String, enum: AREA_TYPES },
     operatingModel: { type: String, enum: OPERATING_MODELS },

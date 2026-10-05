@@ -6,6 +6,7 @@ const router = Router();
 
 router.use(authenticate);
 
+router.get('/overview', dashboardController.getOverview.bind(dashboardController));
 router.get('/stats', dashboardController.getDashboardStats.bind(dashboardController));
 router.get('/filters', dashboardController.getFilterOptions.bind(dashboardController));
 
