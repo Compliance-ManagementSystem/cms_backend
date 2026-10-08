@@ -196,16 +196,15 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
   // RBAC scoping is always applied; explicit filters only narrow it
   const conditions: Record<string, any>[] = [toLocationScopeFilter(getAccessScope(req))];
 
-  // Filter by Entity (id, code or name)
+  // Filter by Entity (id, code or name). A shared unit is listed under its owner
+  // and under every other company operating there.
   if (entity) {
-    if (mongoose.Types.ObjectId.isValid(entity)) {
-      conditions.push({ entity: new Types.ObjectId(entity) });
-    } else {
-      const entityIds = await Entity.find({
-        $or: [{ code: entity.toUpperCase() }, { name: new RegExp(escapeRegex(entity), 'i') }],
-      }).distinct('_id');
-      conditions.push({ entity: { $in: entityIds } });
-    }
+    const entityIds = mongoose.Types.ObjectId.isValid(entity)
+      ? [new Types.ObjectId(entity)]
+      : await Entity.find({
+          $or: [{ code: entity.toUpperCase() }, { name: new RegExp(escapeRegex(entity), 'i') }],
+        }).distinct('_id');
+    conditions.push({ $or: [{ entity: { $in: entityIds } }, { 'coEntities.entity': { $in: entityIds } }] });
   }
 
   // Filter by Location Type (id or code)

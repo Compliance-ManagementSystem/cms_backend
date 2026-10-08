@@ -211,10 +211,14 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
 
   const entityIds = entities.map((e) => e._id);
   const [totalLocations, locationCounts, complianceCounts, healthRecords] = await Promise.all([
-    Location.countDocuments({ entity: { $in: matchingIds } }),
+    Location.countDocuments({ $or: [{ entity: { $in: matchingIds } }, { 'coEntities.entity': { $in: matchingIds } }] }),
+    // A shared unit counts for its owner and for every other company operating there
     Location.aggregate([
-      { $match: { entity: { $in: entityIds } } },
-      { $group: { _id: '$entity', count: { $sum: 1 } } },
+      { $match: { $or: [{ entity: { $in: entityIds } }, { 'coEntities.entity': { $in: entityIds } }] } },
+      { $project: { operator: { $concatArrays: [['$entity'], { $ifNull: ['$coEntities.entity', []] }] } } },
+      { $unwind: '$operator' },
+      { $match: { operator: { $in: entityIds } } },
+      { $group: { _id: '$operator', count: { $sum: 1 } } },
     ]),
     ComplianceRecord.aggregate([
       { $match: { entity: { $in: entityIds } } },
@@ -282,13 +286,18 @@ export const getEntityById = asyncHandler(async (req: Request, res: Response) =>
 
   const entityId = entity._id;
 
-  const [locations, compRecords, statusGroups, healthRecords, documents, tasks, auditLogs] = await Promise.all([
-    Location.find({ entity: entityId })
+  // Units the entity owns, plus shared units it operates at
+  const locationFilter = { $or: [{ entity: entityId }, { 'coEntities.entity': entityId }] };
+
+  const [locations, locationCount, compRecords, statusGroups, healthRecords, documents, tasks, auditLogs] = await Promise.all([
+    Location.find(locationFilter)
       .populate('locationType', 'code label')
       .populate('manager', 'firstName lastName email phone')
       .sort({ createdAt: -1 })
       .limit(50)
       .lean(),
+    // The list above is capped; this is the real number
+    Location.countDocuments(locationFilter),
     ComplianceRecord.find({ entity: entityId })
       .select('recordNumber status dueDate expiryDate rule location createdAt')
       .populate({
@@ -338,6 +347,7 @@ export const getEntityById = asyncHandler(async (req: Request, res: Response) =>
   return ApiResponse.success(res, {
     entity,
     locations,
+    locationCount,
     complianceStats,
     health: summariseHealth(healthRecords),
     // `complianceRule` is the name the client reads
