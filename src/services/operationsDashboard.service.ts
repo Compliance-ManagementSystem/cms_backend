@@ -19,6 +19,7 @@ import Location from '../models/Location.js';
 import ComplianceRecord from '../models/ComplianceRecord.js';
 import ComplianceRule from '../models/ComplianceRule.js';
 import AuditLog from '../models/AuditLog.js';
+import MasterData from '../models/MasterData.js';
 import { AccessScope, toLocationScopeFilter, toScopeFilter } from '../utils/accessScope.js';
 
 export interface OperationsFilters {
@@ -167,11 +168,12 @@ export class OperationsDashboardService {
       locationConditions.push({ $or: [{ entity: entityId }, { 'coEntities.entity': entityId }] });
     }
 
-    const [locations, scopedStates, entities] = await Promise.all([
+    // Location types are read alongside, not populated: populating costs a second trip
+    const [locations, locationTypes, scopedStates, entities] = await Promise.all([
       Location.find({ $and: locationConditions })
         .select('name code status isUpcoming openingDate areaType locationType entity coEntities.entity address.state address.district')
-        .populate('locationType', 'code label')
         .lean(),
+      MasterData.find({ category: 'location_type' }).select('code label').lean(),
       Location.find(scopedLocationFilter).distinct('address.state'),
       Entity.find(
         scope.unrestricted || !scope.entityId
@@ -184,6 +186,7 @@ export class OperationsDashboardService {
     ]);
 
     const locationById = new Map(locations.map((loc) => [String(loc._id), loc]));
+    const typeById = new Map(locationTypes.map((type) => [String(type._id), type]));
     const bucketByLocation = new Map(locations.map((loc) => [String(loc._id), unitBucket(loc, now)]));
 
     // ── Unit counts ────────────────────────────────────────────────────────────
@@ -214,7 +217,7 @@ export class OperationsDashboardService {
         districtUnits.get(key)!.units++;
       }
 
-      const type = loc.locationType as { code?: string; label?: string } | undefined;
+      const type = typeById.get(String(loc.locationType));
       const typeCode = type?.code || 'UNKNOWN';
       if (!typeUnits.has(typeCode)) typeUnits.set(typeCode, { code: typeCode, label: type?.label || 'Unknown', units: 0 });
       typeUnits.get(typeCode)!.units++;
@@ -277,7 +280,26 @@ export class OperationsDashboardService {
       $sum: { $cond: [{ $lte: ['$expiryDate', new Date(now.getTime() + days * DAY_MS)] }, 1, 0] },
     });
 
-    const [[summary], rules] = await Promise.all([
+    // State × licence: each state's units are matched as a set, so the database
+    // returns one small row per state, licence and status
+    const liveIdsByState = new Map<string, Types.ObjectId[]>();
+    for (const loc of locations) {
+      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
+      const state = loc.address?.state?.trim() || 'Unknown';
+      if (!liveIdsByState.has(state)) liveIdsByState.set(state, []);
+      liveIdsByState.get(state)!.push(loc._id as Types.ObjectId);
+    }
+    // Licence status by the year the unit opened, matched the same way
+    const liveIdsByOpeningYear = new Map<string, Types.ObjectId[]>();
+    for (const loc of locations) {
+      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
+      const cohort = openingYearOf(loc.openingDate);
+      if (!liveIdsByOpeningYear.has(cohort)) liveIdsByOpeningYear.set(cohort, []);
+      liveIdsByOpeningYear.get(cohort)!.push(loc._id as Types.ObjectId);
+    }
+    // Every query below depends only on the units found above, so they run together:
+    // the time taken is one trip to the database, not one per query
+    const [[summary], rules, stateRuleCounts, openingYearCounts, auditLogs] = await Promise.all([
       ComplianceRecord.aggregate<{
         byLocation: Array<{ _id: { location: Types.ObjectId; bucket: LicenceBucket | 'notApplicable' }; count: number }>;
         byRule: Array<{ _id: { rule: Types.ObjectId; bucket: LicenceBucket | 'notApplicable' }; count: number }>;
@@ -314,48 +336,43 @@ export class OperationsDashboardService {
         },
       ]),
       ComplianceRule.find().select('name code').lean(),
+      Promise.all(
+        Array.from(liveIdsByState.entries()).map(async ([state, ids]) => ({
+          state,
+          rows: await ComplianceRecord.aggregate<{ _id: { rule: Types.ObjectId; bucket: string }; count: number }>([
+            { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
+            { $project: { rule: 1, bucket: licenceBucketExpression(now) } },
+            { $match: { bucket: { $ne: 'notApplicable' } } },
+            { $group: { _id: { rule: '$rule', bucket: '$bucket' }, count: { $sum: 1 } } },
+          ]),
+        }))
+      ),
+      Promise.all(
+        Array.from(liveIdsByOpeningYear.entries()).map(async ([year, ids]) => ({
+          year,
+          rows: await ComplianceRecord.aggregate<{ _id: string; count: number }>([
+            { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
+            { $project: { bucket: licenceBucketExpression(now) } },
+            { $match: { bucket: { $ne: 'notApplicable' } } },
+            { $group: { _id: '$bucket', count: { $sum: 1 } } },
+          ]),
+        }))
+      ),
+      // Sign-ins and sign-outs are not changes to the data
+      canReadAuditTrail
+        ? AuditLog.find({
+            action: { $not: /LOGIN|LOGOUT/i },
+            ...(!scope.unrestricted && scope.entityId
+              ? { entityId: { $in: [scope.entityId, new Types.ObjectId(scope.entityId)] } }
+              : {}),
+          })
+            .sort({ createdAt: -1 })
+            .limit(6)
+            .select('action description actorEmail user createdAt')
+            .populate('user', 'firstName lastName')
+            .lean()
+        : [],
     ]);
-
-    // State × licence: each state's units are matched as a set, so the database
-    // returns one small row per state, licence and status
-    const liveIdsByState = new Map<string, Types.ObjectId[]>();
-    for (const loc of locations) {
-      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
-      const state = loc.address?.state?.trim() || 'Unknown';
-      if (!liveIdsByState.has(state)) liveIdsByState.set(state, []);
-      liveIdsByState.get(state)!.push(loc._id as Types.ObjectId);
-    }
-    const stateRuleCounts = await Promise.all(
-      Array.from(liveIdsByState.entries()).map(async ([state, ids]) => ({
-        state,
-        rows: await ComplianceRecord.aggregate<{ _id: { rule: Types.ObjectId; bucket: string }; count: number }>([
-          { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
-          { $project: { rule: 1, bucket: licenceBucketExpression(now) } },
-          { $match: { bucket: { $ne: 'notApplicable' } } },
-          { $group: { _id: { rule: '$rule', bucket: '$bucket' }, count: { $sum: 1 } } },
-        ]),
-      }))
-    );
-
-    // Licence status by the year the unit opened, matched the same way
-    const liveIdsByOpeningYear = new Map<string, Types.ObjectId[]>();
-    for (const loc of locations) {
-      if (bucketByLocation.get(String(loc._id)) === 'closed') continue;
-      const cohort = openingYearOf(loc.openingDate);
-      if (!liveIdsByOpeningYear.has(cohort)) liveIdsByOpeningYear.set(cohort, []);
-      liveIdsByOpeningYear.get(cohort)!.push(loc._id as Types.ObjectId);
-    }
-    const openingYearCounts = await Promise.all(
-      Array.from(liveIdsByOpeningYear.entries()).map(async ([year, ids]) => ({
-        year,
-        rows: await ComplianceRecord.aggregate<{ _id: string; count: number }>([
-          { $match: { $and: [...recordConditions, { location: { $in: ids } }] } },
-          { $project: { bucket: licenceBucketExpression(now) } },
-          { $match: { bucket: { $ne: 'notApplicable' } } },
-          { $group: { _id: '$bucket', count: { $sum: 1 } } },
-        ]),
-      }))
-    );
 
     const ruleById = new Map(rules.map((rule) => [String(rule._id), rule]));
 
@@ -433,18 +450,7 @@ export class OperationsDashboardService {
     // ── Recent activity ────────────────────────────────────────────────────────
     let recentActivity: OperationsDashboardData['recentActivity'] = [];
     if (canReadAuditTrail) {
-      // Sign-ins and sign-outs are not changes to the data
-      const auditFilter: Record<string, any> = { action: { $not: /LOGIN|LOGOUT/i } };
-      if (!scope.unrestricted && scope.entityId) {
-        auditFilter.entityId = { $in: [scope.entityId, new Types.ObjectId(scope.entityId)] };
-      }
-      const logs = await AuditLog.find(auditFilter)
-        .sort({ createdAt: -1 })
-        .limit(6)
-        .select('action description actorEmail user createdAt')
-        .populate('user', 'firstName lastName')
-        .lean();
-      recentActivity = logs.map((log) => {
+      recentActivity = auditLogs.map((log) => {
         const user = log.user as { firstName?: string; lastName?: string } | undefined;
         return {
           id: String(log._id),
@@ -491,7 +497,7 @@ export class OperationsDashboardService {
       licenceGrid: {
         licences: Array.from(ruleLicences.entries())
           .map(([ruleId, counts]) => ({ ruleId, total: withTotals(counts).total }))
-          .sort((a, b) => b.total - a.total)
+          .sort((a, b) => b.total - a.total || a.ruleId.localeCompare(b.ruleId))
           .map(({ ruleId }) => ({
             ruleId,
             code: ruleById.get(ruleId)?.code || '',
