@@ -163,6 +163,7 @@ const auditSnapshot = (location: ILocation) => ({
   areaType: location.areaType,
   operatingModel: location.operatingModel,
   closingDate: location.closingDate,
+  isUpcoming: location.isUpcoming,
   entity: idOf(location.entity),
   coEntities: (location.coEntities || []).map((co) => idOf(co.entity)),
   locationType: idOf(location.locationType),
@@ -174,7 +175,7 @@ const auditSnapshot = (location: ILocation) => ({
 
 // ── 1. Get Paginated Locations with Search, Filter & Sorting ───────────────────
 export const getLocations = asyncHandler(async (req: Request, res: Response) => {
-  const { page, limit, search, entity, locationType, status, state, district, city, areaType, attention, sortBy, sortOrder } =
+  const { page, limit, search, entity, locationType, status, state, district, city, areaType, attention, opening, sortBy, sortOrder } =
     locationQuerySchema.parse(req.query);
 
   const emptyPage = () =>
@@ -226,6 +227,12 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
   if (district) conditions.push({ 'address.district': exactMatch(district) });
   if (city) conditions.push({ 'address.city': exactMatch(city) });
   if (areaType) conditions.push({ areaType });
+
+  // Same rule the dashboard uses to tell planned units from open ones
+  if (opening) {
+    const upcoming = [{ openingDate: { $gt: new Date() } }, { isUpcoming: true, openingDate: null }];
+    conditions.push(opening === 'upcoming' ? { $or: upcoming } : { $nor: upcoming });
+  }
 
   if (search) {
     const searchRegex = new RegExp(escapeRegex(search), 'i');
@@ -425,6 +432,7 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
     manager,
     openingDate,
     closingDate,
+    isUpcoming,
     areaType,
     operatingModel,
     coEntities,
@@ -485,6 +493,7 @@ export const createLocation = asyncHandler(async (req: Request, res: Response) =
     manager: managerId,
     openingDate: openingDate ? new Date(openingDate) : undefined,
     closingDate: closingDate ? new Date(closingDate) : undefined,
+    isUpcoming: !!isUpcoming && !openingDate,
     areaType: areaType || undefined,
     operatingModel: operatingModel || undefined,
     coEntities: Array.isArray(coEntities) ? await resolveCoEntities(coEntities, entityId) : [],
@@ -548,6 +557,7 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
     manager,
     openingDate,
     closingDate,
+    isUpcoming,
     areaType,
     operatingModel,
     coEntities,
@@ -621,6 +631,9 @@ export const updateLocation = asyncHandler(async (req: Request, res: Response) =
   if (openingDate !== undefined) {
     existingLocation.openingDate = openingDate ? new Date(openingDate) : undefined;
   }
+  // The "to be opened" mark only stands while no opening date is set
+  if (isUpcoming !== undefined) existingLocation.isUpcoming = isUpcoming;
+  if (existingLocation.openingDate) existingLocation.isUpcoming = false;
   if (closingDate !== undefined) {
     existingLocation.closingDate = closingDate ? new Date(closingDate) : undefined;
   }

@@ -52,6 +52,7 @@ export const createLocationSchema = z.object({
   manager: optionalRef,
   openingDate: dateString.or(z.literal('')).nullable().optional(),
   closingDate: dateString.or(z.literal('')).nullable().optional(),
+  isUpcoming: z.boolean().optional(), // planned unit with no opening date fixed yet
   areaType,
   operatingModel,
   coEntities: z.array(locationCoEntitySchema).optional(),
@@ -78,6 +79,7 @@ export const locationQuerySchema = z.object({
   areaType: z.enum(['GP', 'NAC', 'MUN']).optional(),
   status: z.enum(['active', 'inactive', 'archived']).optional(),
   attention: z.enum(['true', 'false']).optional(), // only locations with expired compliance
+  opening: z.enum(['opened', 'upcoming']).optional(), // upcoming: marked TBO, or opening date in the future
   sortBy: z.enum(['name', 'code', 'status', 'createdAt', 'updatedAt']).default('createdAt'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
 });
