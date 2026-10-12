@@ -11,6 +11,8 @@ import ComplianceRecord, { ComplianceRecordStatus } from '../models/ComplianceRe
 import ComplianceRule from '../models/ComplianceRule.js';
 import Location from '../models/Location.js';
 import Entity from '../models/Entity.js';
+import CmsDocument from '../models/Document.js';
+import Task from '../models/Task.js';
 import { RuleEngineService } from '../services/ruleEngine.service.js';
 import { ApprovalWorkflowService } from '../services/approvalWorkflow.service.js';
 import {
@@ -501,6 +503,13 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
 
   await ComplianceRecord.findByIdAndDelete(id);
 
+  // Nothing may be left pointing at the deleted record: documents are archived
+  // (soft-deleted, as in deleteDocument) and its tasks are removed
+  await Promise.all([
+    CmsDocument.updateMany({ complianceRecord: record._id, status: { $ne: 'archived' } }, { status: 'archived' }),
+    Task.deleteMany({ complianceRecord: record._id }),
+  ]);
+
   await auditService.logMutation({
     req,
     action: 'COMPLIANCE_DELETED',
@@ -508,7 +517,8 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
     entityType: 'ComplianceRecord',
     recordId: record._id,
     entityId: record.entity as Types.ObjectId,
-    previousValue: { recordNumber: record.recordNumber, status: record.status },
+    // Full snapshot: the record is hard-deleted, so this is the only copy left
+    previousValue: record.toObject({ depopulate: true }),
     description: `Deleted statutory compliance record '${record.recordNumber}'`,
   });
 
