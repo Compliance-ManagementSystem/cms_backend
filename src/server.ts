@@ -1,6 +1,7 @@
 import http from 'http';
 import { env } from './config/env.js';
 import { connectDB } from './config/db.js';
+import { prepareComplianceRecordSoftDelete } from './utils/complianceRecordSoftDelete.js';
 import createApp from './app.js';
 import { socketService } from './services/socket.service.js';
 import { schedulerService } from './services/scheduler.service.js';
@@ -8,6 +9,7 @@ import { schedulerService } from './services/scheduler.service.js';
 const startServer = async (): Promise<void> => {
   // Connect to MongoDB first
   await connectDB();
+  await prepareComplianceRecordSoftDelete();
 
   const app = createApp();
   const httpServer = http.createServer(app);

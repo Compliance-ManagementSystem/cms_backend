@@ -18,6 +18,9 @@
  *   - currentVersion
  *   - documents
  *   - approvals
+ *
+ * Deleting a record is a soft delete (isDeleted / deletedAt / deletedBy). Every query and
+ * aggregate on this model leaves deleted records out unless run with { includeDeleted: true }.
  */
 
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
@@ -84,6 +87,8 @@ export interface IComplianceRecord extends Document {
 
   // Number printed on the licence / registration certificate
   licenceNumber?: string;
+  // Number on the authority's acknowledgement, captured when the licence is applied for
+  acknowledgementNumber?: string;
 
   // Key Dates
   dueDate?: Date;
@@ -116,6 +121,11 @@ export interface IComplianceRecord extends Document {
   // Tracking reminders
   remindersSent: number[];
   lastReminderSentAt?: Date;
+
+  // Soft delete
+  isDeleted: boolean;
+  deletedAt?: Date;
+  deletedBy?: Ref<unknown>; // → User
 
   createdBy?: Ref<unknown>;
   updatedBy?: Ref<unknown>;
@@ -160,6 +170,7 @@ const complianceRecordSchema = new Schema<IComplianceRecord>(
     assignedUser: { type: Schema.Types.ObjectId, ref: 'User', index: true },
 
     licenceNumber: { type: String, trim: true },
+    acknowledgementNumber: { type: String, trim: true },
 
     dueDate: { type: Date, index: true },
     submissionDate: { type: Date },
@@ -185,6 +196,10 @@ const complianceRecordSchema = new Schema<IComplianceRecord>(
     remindersSent: { type: [Number], default: [] },
     lastReminderSentAt: { type: Date },
 
+    isDeleted: { type: Boolean, default: false, index: true },
+    deletedAt: { type: Date },
+    deletedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+
     createdBy: { type: Schema.Types.ObjectId, ref: 'User' },
     updatedBy: { type: Schema.Types.ObjectId, ref: 'User' },
   },
@@ -195,10 +210,40 @@ const complianceRecordSchema = new Schema<IComplianceRecord>(
   }
 );
 
-// ── Compound unique: one record per location × rule ────────────────────────────
-complianceRecordSchema.index({ location: 1, rule: 1 }, { unique: true });
+// ── Compound unique: one live record per location × rule ───────────────────────
+// Deleted records sit outside the index, so the same record can be created again.
+export const LOCATION_RULE_INDEX = 'location_rule_unique_live';
+complianceRecordSchema.index(
+  { location: 1, rule: 1 },
+  { unique: true, name: LOCATION_RULE_INDEX, partialFilterExpression: { isDeleted: false } }
+);
 complianceRecordSchema.index({ entity: 1, status: 1 });
 complianceRecordSchema.index({ status: 1, dueDate: 1 });
+
+// ── Soft delete: leave deleted records out of every read ───────────────────────
+const NOT_DELETED = { isDeleted: { $ne: true } };
+
+complianceRecordSchema.pre(
+  [
+    'find',
+    'findOne',
+    'countDocuments',
+    'distinct',
+    'findOneAndUpdate',
+    'findOneAndDelete',
+    'updateOne',
+    'updateMany',
+    'deleteOne',
+    'deleteMany',
+  ],
+  function () {
+    if (!this.getOptions().includeDeleted) this.where(NOT_DELETED);
+  }
+);
+
+complianceRecordSchema.pre('aggregate', function () {
+  if (!this.options.includeDeleted) this.pipeline().unshift({ $match: NOT_DELETED });
+});
 
 // ── Pre-save Synchronizer Hook ────────────────────────────────────────────────
 complianceRecordSchema.pre('validate', async function (next) {
@@ -212,7 +257,7 @@ complianceRecordSchema.pre('validate', async function (next) {
   // Generate unique recordNumber if not present
   if (!this.recordNumber) {
     const year = new Date().getFullYear();
-    const count = await mongoose.model('ComplianceRecord').countDocuments();
+    const count = await mongoose.model('ComplianceRecord').countDocuments().setOptions({ includeDeleted: true });
     const randomSuffix = Math.floor(1000 + Math.random() * 9000);
     this.recordNumber = `CR-${year}-${String(count + 1).padStart(4, '0')}-${randomSuffix}`;
   }

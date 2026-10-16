@@ -257,7 +257,6 @@ export const createComplianceRecord = asyncHandler(async (req: Request, res: Res
     complianceRule: validated.rule,
     assignedUser: validated.assignedUser || undefined,
     dueDate,
-    expiryDate: validated.expiryDate ? new Date(validated.expiryDate) : undefined,
     comments: validated.comments,
     notes: validated.notes,
     status: 'pending',
@@ -299,6 +298,9 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
   if (validated.dueDate) record.dueDate = new Date(validated.dueDate);
   if (validated.expiryDate) record.expiryDate = new Date(validated.expiryDate);
   if (validated.licenceNumber !== undefined) record.licenceNumber = validated.licenceNumber || undefined;
+  if (validated.acknowledgementNumber !== undefined) {
+    record.acknowledgementNumber = validated.acknowledgementNumber || undefined;
+  }
   if (validated.issueDate !== undefined) {
     record.issueDate = validated.issueDate ? new Date(validated.issueDate) : undefined;
   }
@@ -325,7 +327,7 @@ export const updateComplianceRecord = asyncHandler(async (req: Request, res: Res
 // ── 5. Update Status Transition (Submit, Review, Approve, Reject, Expire) ──────
 export const updateComplianceRecordStatus = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
-  const { status, comments, decision, licenceNumber, issueDate, expiryDate } =
+  const { status, comments, decision, licenceNumber, acknowledgementNumber, issueDate, expiryDate } =
     updateComplianceStatusSchema.parse(req.body);
 
   const record = await ComplianceRecord.findById(id);
@@ -344,6 +346,10 @@ export const updateComplianceRecordStatus = asyncHandler(async (req: Request, re
 
   // Licence details entered alongside the status
   if (licenceNumber !== undefined) record.licenceNumber = licenceNumber || undefined;
+  if (acknowledgementNumber !== undefined) record.acknowledgementNumber = acknowledgementNumber || undefined;
+  if (status === 'in_progress' && statusChanged && !record.acknowledgementNumber) {
+    throw ApiError.badRequest('An acknowledgement number is required when the status is Applied.');
+  }
   if (issueDate !== undefined) record.issueDate = issueDate ? new Date(issueDate) : undefined;
   if (expiryDate !== undefined) record.expiryDate = expiryDate ? new Date(expiryDate) : undefined;
   if (record.issueDate && record.expiryDate && record.expiryDate < record.issueDate) {
@@ -501,10 +507,17 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
 
   assertInScope(req, record);
 
-  await ComplianceRecord.findByIdAndDelete(id);
+  const previousValue = record.toObject({ depopulate: true });
 
-  // Nothing may be left pointing at the deleted record: documents are archived
-  // (soft-deleted, as in deleteDocument) and its tasks are removed
+  // Soft delete: the record is kept (hidden everywhere) with who deleted it and when
+  record.isDeleted = true;
+  record.deletedAt = new Date();
+  record.deletedBy = req.auth?.userId as any;
+  record.updatedBy = req.auth?.userId as any;
+  await record.save();
+
+  // Its documents are archived (as in deleteDocument) and stay linked to the record;
+  // its tasks are removed
   await Promise.all([
     CmsDocument.updateMany({ complianceRecord: record._id, status: { $ne: 'archived' } }, { status: 'archived' }),
     Task.deleteMany({ complianceRecord: record._id }),
@@ -517,8 +530,8 @@ export const deleteComplianceRecord = asyncHandler(async (req: Request, res: Res
     entityType: 'ComplianceRecord',
     recordId: record._id,
     entityId: record.entity as Types.ObjectId,
-    // Full snapshot: the record is hard-deleted, so this is the only copy left
-    previousValue: record.toObject({ depopulate: true }),
+    previousValue,
+    newValue: { isDeleted: true, deletedAt: record.deletedAt, deletedBy: record.deletedBy },
     description: `Deleted statutory compliance record '${record.recordNumber}'`,
   });
 

@@ -14,14 +14,15 @@ export const createComplianceRecordSchema = z.object({
   rule: z.string().min(1, 'Compliance Rule ID is required'),
   assignedUser: z.string().optional(),
   dueDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
-  expiryDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
   comments: z.string().optional(),
   notes: z.string().optional(),
 });
 
 export const updateComplianceRecordSchema = createComplianceRecordSchema.partial().extend({
   licenceNumber: z.string().trim().max(100).optional(),
+  acknowledgementNumber: z.string().trim().max(100).optional(),
   issueDate: clearableDate,
+  expiryDate: dateInput.optional(),
   submissionDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
   approvalDate: z.string().datetime().or(z.string().regex(/^\d{4}-\d{2}-\d{2}/)).optional(),
 });
@@ -43,6 +44,8 @@ export const updateComplianceStatusSchema = z.object({
   comments: z.string().optional(),
   // Licence details can be saved together with the status
   licenceNumber: z.string().trim().max(100).optional(),
+  // Acknowledgement from the authority, entered when the status is set to Applied
+  acknowledgementNumber: z.string().trim().max(100).optional(),
   issueDate: clearableDate,
   expiryDate: clearableDate,
   decision: z.enum(['pending', 'approved', 'rejected', 'escalated']).optional(),
