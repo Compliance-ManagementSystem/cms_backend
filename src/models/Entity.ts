@@ -11,6 +11,7 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import type { ActiveStatus, Ref } from '../types/models.js';
 
+import { searchTokensPlugin } from '../utils/search.js';
 // ── Address (embedded) ────────────────────────────────────────────────────────
 
 export interface IAddress {
@@ -139,6 +140,11 @@ entitySchema.virtual('entityCode').get(function (this: IEntity) {
 entitySchema.index({ status: 1 });
 entitySchema.index({ entityType: 1 });
 entitySchema.index({ parentEntity: 1 });
+
+// Indexed prefix search (see utils/search.ts)
+entitySchema.plugin(searchTokensPlugin, {
+  fields: ['name', 'code', 'contactPerson', 'contactEmail', 'contactPhone', 'address.city', 'address.state'],
+});
 
 const Entity: Model<IEntity> = mongoose.model<IEntity>('Entity', entitySchema);
 export default Entity;

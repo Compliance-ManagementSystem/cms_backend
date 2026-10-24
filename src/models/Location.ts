@@ -15,6 +15,7 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import type { ActiveStatus, Ref } from '../types/models.js';
 import type { IAddress } from './Entity.js';
 
+import { searchTokensPlugin } from '../utils/search.js';
 // Re-use the embedded address schema shape
 const locationAddressSchema = new Schema<IAddress>(
   {
@@ -186,6 +187,11 @@ locationSchema.index({ 'coEntities.entity': 1 });
 locationSchema.index({ locationType: 1 });
 locationSchema.index({ parentLocation: 1 });
 locationSchema.index({ 'agreements.endDate': 1 }); // For expiry queries
+
+// Indexed prefix search (see utils/search.ts)
+locationSchema.plugin(searchTokensPlugin, {
+  fields: ['name', 'code', 'contactPerson', 'contactEmail', 'contactPhone', 'address.city', 'address.state'],
+});
 
 const Location: Model<ILocation> = mongoose.model<ILocation>(
   'Location',

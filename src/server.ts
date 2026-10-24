@@ -2,6 +2,7 @@ import http from 'http';
 import { env } from './config/env.js';
 import { connectDB } from './config/db.js';
 import { prepareComplianceRecordSoftDelete } from './utils/complianceRecordSoftDelete.js';
+import { backfillSearchTokens } from './utils/searchTokensBackfill.js';
 import createApp from './app.js';
 import { socketService } from './services/socket.service.js';
 import { schedulerService } from './services/scheduler.service.js';
@@ -10,6 +11,8 @@ const startServer = async (): Promise<void> => {
   // Connect to MongoDB first
   await connectDB();
   await prepareComplianceRecordSoftDelete();
+  // Runs in the background: search results fill in as older records are indexed
+  backfillSearchTokens().catch((err) => console.error('Search token backfill failed:', err));
 
   const app = createApp();
   const httpServer = http.createServer(app);

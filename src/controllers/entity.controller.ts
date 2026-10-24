@@ -28,6 +28,7 @@ import { getAccessScope } from '../utils/accessScope.js';
 import { expiredRecordCondition, summariseHealth } from '../utils/complianceHealth.js';
 import { entityQuerySchema } from '../validations/entity.validation.js';
 
+import { searchTokenFilter } from '../utils/search.js';
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const exactMatch = (value: string): RegExp => new RegExp(`^${escapeRegex(value.trim())}$`, 'i');
 
@@ -161,19 +162,8 @@ export const getEntities = asyncHandler(async (req: Request, res: Response) => {
     conditions.push({ _id: new Types.ObjectId(scope.entityId) });
   }
 
-  if (search) {
-    const searchRegex = new RegExp(escapeRegex(search), 'i');
-    conditions.push({
-      $or: [
-        { name: searchRegex },
-        { code: searchRegex },
-        { 'address.city': searchRegex },
-        { 'address.state': searchRegex },
-        { contactEmail: searchRegex },
-        { contactPhone: searchRegex },
-      ],
-    });
-  }
+  const searchFilter = searchTokenFilter(search);
+  if (searchFilter) conditions.push(searchFilter);
 
   if (entityType) conditions.push({ entityType: new Types.ObjectId(entityType) });
   if (status) conditions.push({ status });

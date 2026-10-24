@@ -9,6 +9,7 @@
     "start": "node dist/server.js",
     "seed:dev": "tsx src/seeds/dev.seed.ts",
     "import:locations": "tsx src/seeds/import-location-master.ts",
+    "search:reindex": "tsx src/seeds/rebuild-search-tokens.ts",
     "lint": "eslint src",
     "format": "prettier --write \"src/**/*.ts\""
   },

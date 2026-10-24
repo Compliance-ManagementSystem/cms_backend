@@ -28,6 +28,7 @@ import { ApiError } from '../utils/apiError.js';
 import { ROLES } from '../constants/permissions.js';
 import type { TaskStatus, TaskPriority } from '../types/models.js';
 
+import { escapeRegex, searchTokenFilter } from '../utils/search.js';
 export interface CreateTaskInput {
   title: string;
   description?: string;
@@ -121,7 +122,6 @@ const startOfDay = (date: Date): Date => {
 
 const dateKey = (date: Date): string => new Date(date).toISOString().slice(0, 10);
 
-const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 export class TaskAutomationService {
   /**
@@ -224,13 +224,16 @@ export class TaskAutomationService {
     }
 
     if (params.search?.trim()) {
-      const searchRegex = new RegExp(escapeRegex(params.search.trim()), 'i');
-      const matchingRecordIds = await ComplianceRecord.find({ recordNumber: searchRegex }).distinct('_id');
+      // Record numbers are stored uppercase, so an anchored prefix uses their unique index
+      const recordNumberPrefix = new RegExp(`^${escapeRegex(params.search.trim().toUpperCase())}`);
+      const matchingRecordIds = await ComplianceRecord.find({ recordNumber: recordNumberPrefix }).distinct('_id');
+      const tokenFilter = searchTokenFilter(params.search);
       conditions.push({
         $or: [
-          { title: searchRegex },
-          { description: searchRegex },
+          ...(tokenFilter ? [tokenFilter] : []),
           ...(matchingRecordIds.length ? [{ complianceRecord: { $in: matchingRecordIds } }] : []),
+          // Nothing can match: keep the search from widening to every task
+          ...(!tokenFilter && !matchingRecordIds.length ? [{ _id: null }] : []),
         ],
       });
     }

@@ -23,6 +23,7 @@ import { AccessScope, getAccessScope, toLocationScopeFilter } from '../utils/acc
 import { locationQuerySchema } from '../validations/location.validation.js';
 import { expiredRecordCondition, summariseHealth } from '../utils/complianceHealth.js';
 
+import { searchTokenFilter } from '../utils/search.js';
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const exactMatch = (value: string): RegExp => new RegExp(`^${escapeRegex(value.trim())}$`, 'i');
 
@@ -233,19 +234,8 @@ export const getLocations = asyncHandler(async (req: Request, res: Response) => 
     conditions.push(opening === 'upcoming' ? { $or: upcoming } : { $nor: upcoming });
   }
 
-  if (search) {
-    const searchRegex = new RegExp(escapeRegex(search), 'i');
-    conditions.push({
-      $or: [
-        { name: searchRegex },
-        { code: searchRegex },
-        { contactPerson: searchRegex },
-        { contactEmail: searchRegex },
-        { 'address.city': searchRegex },
-        { 'address.state': searchRegex },
-      ],
-    });
-  }
+  const searchFilter = searchTokenFilter(search);
+  if (searchFilter) conditions.push(searchFilter);
 
   // Locations with at least one expired compliance record need attention.
   // The count ignores the attention filter itself so the card stays meaningful.

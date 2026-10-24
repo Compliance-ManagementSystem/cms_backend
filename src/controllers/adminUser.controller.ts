@@ -12,6 +12,7 @@ import { ApiError } from '../utils/apiError.js';
 import { ApiResponse } from '../utils/apiResponse.js';
 import { asyncHandler } from '../utils/asyncHandler.js';
 import { logAuditEvent } from '../utils/audit.js';
+import { searchTokenFilter } from '../utils/search.js';
 
 // ── 1. Get Paginated Users with Search & Filter ──────────────────────────────
 export const getUsers = asyncHandler(async (req: Request, res: Response) => {
@@ -24,17 +25,8 @@ export const getUsers = asyncHandler(async (req: Request, res: Response) => {
 
   const query: Record<string, any> = {};
 
-  if (search) {
-    const searchRegex = new RegExp(search, 'i');
-    query.$or = [
-      { firstName: searchRegex },
-      { lastName: searchRegex },
-      { email: searchRegex },
-      { phone: searchRegex },
-      { department: searchRegex },
-      { designation: searchRegex },
-    ];
-  }
+  const searchFilter = searchTokenFilter(search);
+  if (searchFilter) Object.assign(query, searchFilter);
 
   if (role) {
     query.role = role;

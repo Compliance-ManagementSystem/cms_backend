@@ -11,6 +11,7 @@ import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import bcrypt from 'bcrypt';
 import type { ActiveStatus, Ref } from '../types/models.js';
 
+import { searchTokensPlugin } from '../utils/search.js';
 // ── User document ─────────────────────────────────────────────────────────────
 
 export interface IUser extends Document {
@@ -129,6 +130,11 @@ userSchema.methods.comparePassword = async function (
 userSchema.index({ role: 1 });
 userSchema.index({ entity: 1 });
 userSchema.index({ status: 1 });
+
+// Indexed prefix search (see utils/search.ts)
+userSchema.plugin(searchTokensPlugin, {
+  fields: ['firstName', 'lastName', 'email', 'phone', 'department', 'designation'],
+});
 
 const User: Model<IUser> = mongoose.model<IUser>('User', userSchema);
 export default User;

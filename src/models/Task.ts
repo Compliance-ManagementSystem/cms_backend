@@ -11,6 +11,7 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import type { TaskStatus, TaskPriority, Ref } from '../types/models.js';
 
+import { searchTokensPlugin } from '../utils/search.js';
 // ── Comment (embedded) ────────────────────────────────────────────────────────
 
 export interface ITaskComment {
@@ -164,6 +165,11 @@ taskSchema.index({ dueDate: 1, status: 1 });       // Overdue job
 taskSchema.index({ complianceRecord: 1, status: 1 });
 taskSchema.index({ autoGenKey: 1 }, { unique: true, sparse: true }); // Prevent duplicate tasks
 taskSchema.index({ isEscalated: 1 });
+
+// Indexed prefix search (see utils/search.ts)
+taskSchema.plugin(searchTokensPlugin, {
+  fields: ['title', 'description'],
+});
 
 const Task: Model<ITask> = mongoose.model<ITask>('Task', taskSchema);
 export default Task;

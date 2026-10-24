@@ -18,6 +18,7 @@
 
 import { Request } from 'express';
 import { Types } from 'mongoose';
+import { escapeRegex } from '../utils/search.js';
 import AuditLog, { AuditEventAction, IAuditLog } from '../models/AuditLog.js';
 import User from '../models/User.js';
 
@@ -212,7 +213,7 @@ export class AuditService {
 
     // Search query (across description, action, module, actorEmail, ipAddress)
     if (filters.search?.trim()) {
-      const regex = new RegExp(filters.search.trim(), 'i');
+      const regex = new RegExp(escapeRegex(filters.search.trim()), 'i');
       match.$or = [
         { description: regex },
         { action: regex },

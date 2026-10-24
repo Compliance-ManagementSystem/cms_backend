@@ -28,6 +28,26 @@ import { asyncHandler } from '../utils/asyncHandler.js';
 import { assertInScope, getAccessScope, toScopeFilter } from '../utils/accessScope.js';
 import { auditService } from '../services/audit.service.js';
 import { TaskAutomationService } from '../services/taskAutomation.service.js';
+import { escapeRegex, searchWords, tokenPrefixFilter } from '../utils/search.js';
+
+/** Records matching one search word directly, through their rule, or through their location. */
+const recordSearchClause = async (word: string) => {
+  const wordStart = new RegExp(`\\b${escapeRegex(word)}`, 'i');
+  const [ruleIds, locationIds] = await Promise.all([
+    // Rules are a small catalogue, so an unindexed match is cheap
+    ComplianceRule.find({ $or: [{ name: wordStart }, { code: wordStart }] }).distinct('_id'),
+    Location.find(tokenPrefixFilter(word)).distinct('_id'),
+  ]);
+  // Every $or branch is indexed, or MongoDB falls back to a collection scan.
+  // `rule` alone suffices: pre('validate') keeps complianceRule in sync with it.
+  return {
+    $or: [
+      tokenPrefixFilter(word),
+      ...(ruleIds.length ? [{ rule: { $in: ruleIds } }] : []),
+      ...(locationIds.length ? [{ location: { $in: locationIds } }] : []),
+    ],
+  };
+};
 
 // ── 1. Get Compliance Records (Paginated, Filtered & Real Counts) ──────────────
 export const getComplianceRecords = asyncHandler(async (req: Request, res: Response) => {
@@ -75,19 +95,10 @@ export const getComplianceRecords = asyncHandler(async (req: Request, res: Respo
     conditions.push({ expiryDate });
   }
 
-  // Text search on recordNumber, licence number, comments and notes
-  if (query.search?.trim()) {
-    const escaped = query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const searchRegex = new RegExp(escaped, 'i');
-    conditions.push({
-      $or: [
-        { recordNumber: searchRegex },
-        { licenceNumber: searchRegex },
-        { comments: searchRegex },
-        { notes: searchRegex },
-      ],
-    });
-  }
+  // Search: every typed word must match the record itself (record/licence
+  // number, comments, notes), its rule's name or code, or its location
+  const searchClauses = await Promise.all(searchWords(query.search).map(recordSearchClause));
+  conditions.push(...searchClauses);
 
   // Overdue: past the due date and still waiting on the submitting unit
   const overdueCondition = {

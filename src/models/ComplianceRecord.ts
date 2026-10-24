@@ -26,6 +26,7 @@
 import mongoose, { Schema, Document, Model, Types } from 'mongoose';
 import type { Ref } from '../types/models.js';
 
+import { searchTokensPlugin } from '../utils/search.js';
 // ── Status Types ─────────────────────────────────────────────────────────────
 export type ComplianceRecordStatus =
   | 'pending'
@@ -273,6 +274,11 @@ complianceRecordSchema.pre('validate', async function (next) {
   }
 
   next();
+});
+
+// Indexed prefix search (see utils/search.ts)
+complianceRecordSchema.plugin(searchTokensPlugin, {
+  fields: ['recordNumber', 'licenceNumber', 'comments', 'notes'],
 });
 
 const ComplianceRecord: Model<IComplianceRecord> = mongoose.model<IComplianceRecord>(
